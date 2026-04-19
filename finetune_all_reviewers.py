@@ -316,7 +316,8 @@ def main():
     MODELS_DIR.mkdir(exist_ok=True)
     RANKINGS_DIR.mkdir(exist_ok=True)
 
-    all_stats = []
+    all_stats  = []
+    stats_path = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"
     total_reviewers = len(pref)
     for idx, row in pref.iterrows():
         reviewer_id = int(row["reviewer"])
@@ -344,10 +345,14 @@ def main():
             print(f"  [SKIP] 映画件数が条件未満 (好み: {len(liked_ids)}, 好みでない: {len(disliked_ids)}, 必要: {min_movie_count})")
             continue
 
+        def append_and_save_stats(entry: dict):
+            all_stats.append(entry)
+            pd.DataFrame(all_stats).to_excel(stats_path, index=False)
+
         if mode_label == "all":
             liked_reviews    = load_positive_sentences(liked_ids)
             disliked_reviews = load_positive_sentences(disliked_ids)
-            all_stats.append({
+            append_and_save_stats({
                 "reviewer_id":           reviewer_id,
                 "reviewer_name":         reviewer_name,
                 "liked_movie_count":     len(liked_ids),
@@ -367,7 +372,7 @@ def main():
             liked_reviews_all,    liked_scores    = extract_reviews_and_scores(liked_ids)
             disliked_reviews_all, disliked_scores = extract_reviews_and_scores(disliked_ids)
 
-            all_stats.append({
+            append_and_save_stats({
                 "reviewer_id":           reviewer_id,
                 "reviewer_name":         reviewer_name,
                 "liked_movie_count":     len(liked_ids),
@@ -398,12 +403,6 @@ def main():
                     min_movie_count  = min_movie_count,
                     top_n            = top_n,
                 )
-
-    # ── 全レビュワー統計を xlsx に保存 ──
-    if all_stats:
-        stats_path = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"
-        pd.DataFrame(all_stats).to_excel(stats_path, index=False)
-        print(f"[INFO] レビュワー統計を保存: {stats_path}")
 
     print("\n[DONE] 全レビュワーのファインチューニングが完了しました。")
 
