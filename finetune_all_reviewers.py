@@ -27,9 +27,9 @@ from pathlib import Path
 import pandas as pd
 import torch
 from fugashi import Tagger
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction import DictVectorizer
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from sklearn.svm import SVC
+from sklearn.svm import LinearSVC
 import joblib
 from torch.utils.data import Dataset
 from transformers import (
@@ -204,43 +204,137 @@ def save_ranking_xlsx(reviewer_id: int, liked_scored: list, disliked_scored: lis
 
 # ── SVM ファインチューニング ──────────────────────────────────────────────────
 
+def _build_movie_tfidf(movie_ids: list) -> dict:
+    """
+    論文 式5.1, 5.2 に従って映画単位のTF-IDFを計算する。
+    文書 d = 映画 m の polarity==1 レビュー全文の集合（名詞のみ対象）
+      tf(t, d) = n_{t,d} / Σ_{s∈d} n_{s,d}
+      idf(t)   = log(N / df(t)) + 1
+    戻り値: {movie_id: {noun: tfidf_value}}
+    """
+    tagger = Tagger()
+    movie_noun_counts: dict[str, Counter] = {}
+
+    for movie_id in movie_ids:
+        path = POSINEGA_DIR / f"{movie_id}.xlsx"
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_excel(path, header=None)
+            pos_reviews = df[df.iloc[:, 1] == 1].iloc[:, 0].dropna().tolist()
+            noun_count: Counter = Counter()
+            for review in pos_reviews:
+                review = str(review).strip()
+                if not review:
+                    continue
+                for w in tagger(review):
+                    if "名詞" in w.feature:
+                        noun_count[w.surface] += 1
+            if noun_count:
+                movie_noun_counts[movie_id] = noun_count
+        except Exception as e:
+            print(f"  [WARN] {movie_id}: {e}")
+
+    N = len(movie_noun_counts)
+    if N == 0:
+        return {}
+
+    # df(t): 各名詞が出現する映画数
+    df_count: Counter = Counter()
+    for noun_count in movie_noun_counts.values():
+        for noun in noun_count:
+            df_count[noun] += 1
+
+    # idf(t) = log(N / df(t)) + 1  （論文 式5.2）
+    idf = {noun: log(N / cnt) + 1 for noun, cnt in df_count.items()}
+
+    # tf(t, d) = n_{t,d} / Σ n_{s,d}  → tf·idf
+    movie_tfidf: dict[str, dict] = {}
+    for movie_id, noun_count in movie_noun_counts.items():
+        total = sum(noun_count.values())
+        movie_tfidf[movie_id] = {
+            noun: (cnt / total) * idf[noun]
+            for noun, cnt in noun_count.items()
+        }
+    return movie_tfidf
+
+
+def _extract_review_vectors(movie_ids: list, movie_tfidf: dict) -> list[dict]:
+    """
+    各映画の polarity==1 レビュー文を読み込み、
+    映画DBのtf·idf値を使って特徴ベクトル（dict形式）に変換する。
+    """
+    tagger = Tagger()
+    vectors: list[dict] = []
+    for movie_id in movie_ids:
+        tfidf = movie_tfidf.get(movie_id)
+        if tfidf is None:
+            continue
+        path = POSINEGA_DIR / f"{movie_id}.xlsx"
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_excel(path, header=None)
+            pos_reviews = df[df.iloc[:, 1] == 1].iloc[:, 0].dropna().tolist()
+            for review in pos_reviews:
+                review = str(review).strip()
+                if not review:
+                    continue
+                vec = {
+                    w.surface: tfidf[w.surface]
+                    for w in tagger(review)
+                    if "名詞" in w.feature and w.surface in tfidf
+                }
+                if vec:
+                    vectors.append(vec)
+        except Exception as e:
+            print(f"  [WARN] {movie_id}: {e}")
+    return vectors
+
+
 def finetune_svm(
     reviewer_id: int,
-    liked_reviews:    list[str],
-    disliked_reviews: list[str],
+    liked_ids:    list[str],
+    disliked_ids: list[str],
     min_movie_count: int = 0,
 ):
     """
-    TF-IDF + SVM (linear kernel) でレビュワー嗜好を学習する。
+    論文 式5.1, 5.2 の映画単位TF-IDF + LinearSVC でレビュワー嗜好を学習する。
     → models/{min_movie_count}/svmmodels/{reviewer_id}/
     """
-    if not liked_reviews or not disliked_reviews:
-        print(f"  [SKIP] reviewer {reviewer_id}: 正例または負例が 0 件")
-        return
-
     model_dir = MODELS_DIR / str(min_movie_count) / "svmmodels" / str(reviewer_id)
     if model_dir.exists():
         print(f"  [SKIP] 既存モデル: {model_dir}")
         return
 
-    print(f"  正例: {len(liked_reviews):,}  負例: {len(disliked_reviews):,}")
+    liked_tfidf    = _build_movie_tfidf(liked_ids)
+    disliked_tfidf = _build_movie_tfidf(disliked_ids)
 
-    all_texts  = liked_reviews + disliked_reviews
-    all_labels = [1] * len(liked_reviews) + [0] * len(disliked_reviews)
+    liked_vecs    = _extract_review_vectors(liked_ids,    liked_tfidf)
+    disliked_vecs = _extract_review_vectors(disliked_ids, disliked_tfidf)
 
-    test_texts  = all_texts[:10]
+    if not liked_vecs or not disliked_vecs:
+        print(f"  [SKIP] reviewer {reviewer_id}: 正例または負例が 0 件")
+        return
+
+    print(f"  正例: {len(liked_vecs):,}  負例: {len(disliked_vecs):,}")
+
+    all_vecs   = liked_vecs + disliked_vecs
+    all_labels = [1] * len(liked_vecs) + [0] * len(disliked_vecs)
+
+    test_vecs   = all_vecs[:10]
     test_labels = all_labels[:10]
 
-    vectorizer = TfidfVectorizer(max_features=10000)
-    X_train = vectorizer.fit_transform(all_texts)
-    X_test  = vectorizer.transform(test_texts)
+    dv = DictVectorizer(sparse=True)
+    X_train = dv.fit_transform(all_vecs)
+    X_test  = dv.transform(test_vecs)
 
-    clf = SVC(kernel="linear", random_state=42)
+    clf = LinearSVC(random_state=42, max_iter=2000)
     clf.fit(X_train, all_labels)
 
     model_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(clf,        model_dir / "svm_model.pkl")
-    joblib.dump(vectorizer, model_dir / "vectorizer.pkl")
+    joblib.dump(clf, model_dir / "svm_model.pkl")
+    joblib.dump(dv,  model_dir / "dict_vectorizer.pkl")
 
     preds = clf.predict(X_test)
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -375,9 +469,13 @@ def main():
 
     all_stats  = []
     stats_path = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"
+    MAX_REVIEWER_ID = 250
     total_reviewers = len(pref)
     for idx, row in pref.iterrows():
         reviewer_id = int(row["reviewer"])
+        if reviewer_id > MAX_REVIEWER_ID:
+            print(f"  [STOP] reviewer_id {reviewer_id} が上限 {MAX_REVIEWER_ID} を超えたため終了")
+            break
         reviewer_name = id_to_name.get(reviewer_id, str(reviewer_id))
 
         liked_raw    = row.get("liked_movie_ids",    "")
@@ -419,8 +517,8 @@ def main():
             })
             finetune_svm(
                 reviewer_id     = reviewer_id,
-                liked_reviews   = liked_reviews,
-                disliked_reviews= disliked_reviews,
+                liked_ids       = liked_ids,
+                disliked_ids    = disliked_ids,
                 min_movie_count = min_movie_count,
             )
         elif mode_label == "all":
@@ -463,8 +561,9 @@ def main():
 
             save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)
 
+            top_n_step = TOP_N_LIST[1] - TOP_N_LIST[0] if len(TOP_N_LIST) > 1 else TOP_N_LIST[0]
             for top_n in TOP_N_LIST:
-                if len(liked_scored) < top_n and len(disliked_scored) < top_n:
+                if min(len(liked_scored), len(disliked_scored)) <= top_n - top_n_step:
                     print(f"  [STOP] N={top_n} に必要な文数が不足 "
                           f"(正例: {len(liked_scored)}, 負例: {len(disliked_scored)})")
                     break
