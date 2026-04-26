@@ -390,7 +390,7 @@ def main():
             save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)
 
             for top_n in TOP_N_LIST:
-                if len(liked_scored) < top_n and len(disliked_scored) < top_n:
+                if len(liked_scored) < top_n or len(disliked_scored) < top_n:
                     print(f"  [STOP] N={top_n} に必要な文数が不足 "
                           f"(正例: {len(liked_scored)}, 負例: {len(disliked_scored)})")
                     break
