@@ -389,8 +389,9 @@ def main():
 
             save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)
 
+            top_n_step = TOP_N_LIST[1] - TOP_N_LIST[0] if len(TOP_N_LIST) > 1 else TOP_N_LIST[0]
             for top_n in TOP_N_LIST:
-                if len(liked_scored) < top_n or len(disliked_scored) < top_n:
+                if min(len(liked_scored), len(disliked_scored)) <= top_n - top_n_step:
                     print(f"  [STOP] N={top_n} に必要な文数が不足 "
                           f"(正例: {len(liked_scored)}, 負例: {len(disliked_scored)})")
                     break
