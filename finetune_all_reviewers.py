@@ -239,16 +239,13 @@ def _build_movie_tfidf(movie_ids: list) -> dict:
     if N == 0:
         return {}
 
-    # df(t): 各名詞が出現する映画数
     df_count: Counter = Counter()
     for noun_count in movie_noun_counts.values():
         for noun in noun_count:
             df_count[noun] += 1
 
-    # idf(t) = log(N / df(t)) + 1  （論文 式5.2）
     idf = {noun: log(N / cnt) + 1 for noun, cnt in df_count.items()}
 
-    # tf(t, d) = n_{t,d} / Σ n_{s,d}  → tf·idf
     movie_tfidf: dict[str, dict] = {}
     for movie_id, noun_count in movie_noun_counts.items():
         total = sum(noun_count.values())
