@@ -27,7 +27,10 @@ from pathlib import Path
 import pandas as pd
 import torch
 from fugashi import Tagger
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.svm import SVC
+import joblib
 from torch.utils.data import Dataset
 from transformers import (
     BertForSequenceClassification,
@@ -199,6 +202,54 @@ def save_ranking_xlsx(reviewer_id: int, liked_scored: list, disliked_scored: lis
     print(f"  [RANKING] 保存: {out_path}")
 
 
+# ── SVM ファインチューニング ──────────────────────────────────────────────────
+
+def finetune_svm(
+    reviewer_id: int,
+    liked_reviews:    list[str],
+    disliked_reviews: list[str],
+    min_movie_count: int = 0,
+):
+    """
+    TF-IDF + SVM (linear kernel) でレビュワー嗜好を学習する。
+    → models/{min_movie_count}/svmmodels/{reviewer_id}/
+    """
+    if not liked_reviews or not disliked_reviews:
+        print(f"  [SKIP] reviewer {reviewer_id}: 正例または負例が 0 件")
+        return
+
+    model_dir = MODELS_DIR / str(min_movie_count) / "svmmodels" / str(reviewer_id)
+    if model_dir.exists():
+        print(f"  [SKIP] 既存モデル: {model_dir}")
+        return
+
+    print(f"  正例: {len(liked_reviews):,}  負例: {len(disliked_reviews):,}")
+
+    all_texts  = liked_reviews + disliked_reviews
+    all_labels = [1] * len(liked_reviews) + [0] * len(disliked_reviews)
+
+    test_texts  = all_texts[:10]
+    test_labels = all_labels[:10]
+
+    vectorizer = TfidfVectorizer(max_features=10000)
+    X_train = vectorizer.fit_transform(all_texts)
+    X_test  = vectorizer.transform(test_texts)
+
+    clf = SVC(kernel="linear", random_state=42)
+    clf.fit(X_train, all_labels)
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(clf,        model_dir / "svm_model.pkl")
+    joblib.dump(vectorizer, model_dir / "vectorizer.pkl")
+
+    preds = clf.predict(X_test)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        test_labels, preds, average="binary", zero_division=0
+    )
+    acc = accuracy_score(test_labels, preds)
+    print(f"  評価結果: accuracy={acc:.4f}, f1={f1:.4f}, precision={precision:.4f}, recall={recall:.4f}")
+
+
 # ── BERT ファインチューニング ──────────────────────────────────────────────────
 
 def finetune(
@@ -288,12 +339,13 @@ def main():
     # ── モード選択 ──
     print("=" * 60)
     print("ファインチューニングモードを選択してください")
-    print("  1: 全レビュー文でファインチューニング")
-    print("  2: TF-IDF 名詞スコア上位 N 件でファインチューニング")
+    print("  1: SVM (linear kernel) でファインチューニング")
+    print("  2: 全レビュー文で BERT をファインチューニング")
+    print("  3: TF-IDF 名詞スコア上位 N 件で BERT をファインチューニング")
     print("=" * 60)
-    mode_input = input("モード (1 or 2): ").strip()
-    while mode_input not in ("1", "2"):
-        mode_input = input("1 または 2 を入力してください: ").strip()
+    mode_input = input("モード (1, 2, or 3): ").strip()
+    while mode_input not in ("1", "2", "3"):
+        mode_input = input("1, 2, または 3 を入力してください: ").strip()
 
     TOP_N_LIST = list(range(100, 5001, 100))  # 100, 200, ..., 5000
 
@@ -303,8 +355,13 @@ def main():
         min_n_input = input("正の整数を入力してください: ").strip()
     min_movie_count = int(min_n_input)
 
-    mode_label = "all" if mode_input == "1" else "topn"
-    print(f"\n[INFO] モード: {'全レビュー' if mode_input == '1' else f'上位 N 件 (N={TOP_N_LIST})'}")
+    mode_label = {"1": "svm", "2": "all", "3": "topn"}[mode_input]
+    mode_names = {
+        "1": "SVM (linear kernel)",
+        "2": "全レビュー BERT",
+        "3": f"上位 N 件 BERT (N={TOP_N_LIST})",
+    }
+    print(f"\n[INFO] モード: {mode_names[mode_input]}")
     print(f"[INFO] 対象レビュワー条件: 好み映画 >= {min_movie_count} 件 かつ 好みでない映画 >= {min_movie_count} 件\n")
 
     # ── reviewer_summary.xlsx 読み込み ──
@@ -349,7 +406,24 @@ def main():
             all_stats.append(entry)
             pd.DataFrame(all_stats).to_excel(stats_path, index=False)
 
-        if mode_label == "all":
+        if mode_label == "svm":
+            liked_reviews    = load_positive_sentences(liked_ids)
+            disliked_reviews = load_positive_sentences(disliked_ids)
+            append_and_save_stats({
+                "reviewer_id":           reviewer_id,
+                "reviewer_name":         reviewer_name,
+                "liked_movie_count":     len(liked_ids),
+                "disliked_movie_count":  len(disliked_ids),
+                "liked_review_count":    len(liked_reviews),
+                "disliked_review_count": len(disliked_reviews),
+            })
+            finetune_svm(
+                reviewer_id     = reviewer_id,
+                liked_reviews   = liked_reviews,
+                disliked_reviews= disliked_reviews,
+                min_movie_count = min_movie_count,
+            )
+        elif mode_label == "all":
             liked_reviews    = load_positive_sentences(liked_ids)
             disliked_reviews = load_positive_sentences(disliked_ids)
             append_and_save_stats({
@@ -367,7 +441,7 @@ def main():
                 mode             = mode_label,
                 min_movie_count  = min_movie_count,
             )
-        else:
+        else:  # topn
             # TF-IDF スコアを一度だけ計算してN値ごとに再利用
             liked_reviews_all,    liked_scores    = extract_reviews_and_scores(liked_ids)
             disliked_reviews_all, disliked_scores = extract_reviews_and_scores(disliked_ids)
