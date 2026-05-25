@@ -1,0 +1,15 @@
+reviews/
+experiment_all/
+experiment/
+models/
+output/
+system/
+reviews_posinega/
+reviews_posinega.py
+極性付きレビューファイル/
+reviewer_summary.xlsx
+*.xlsx
+aggregate_reviews.py
+create_experiment.py
+createDataset.py
+レビュー一文分割とfasttext極性判別のプロンプト.txt
