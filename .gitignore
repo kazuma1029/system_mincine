@@ -13,3 +13,5 @@ aggregate_reviews.py
 create_experiment.py
 createDataset.py
 レビュー一文分割とfasttext極性判別のプロンプト.txt
+score_rankings/
+.gitignore

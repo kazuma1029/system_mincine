@@ -143,7 +143,7 @@ def _build_tfidf_from_experiment(reviewer_id: int) -> dict:
         for noun in nc:
             df_count[noun] += 1
 
-    idf = {noun: log(N / cnt) + 1 for noun, cnt in df_count.items()}
+    idf = {noun: log(N / cnt, 2) + 1 for noun, cnt in df_count.items()}
 
     movie_tfidf: dict[str, dict] = {}
     for movie_id, nc in movie_noun_counts.items():

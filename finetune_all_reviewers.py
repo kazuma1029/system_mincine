@@ -225,7 +225,7 @@ def _build_movie_tfidf(movie_ids: list, all_movie_ids: list | None = None) -> di
             for noun in movie_noun_counts[mid]:
                 df_count[noun] += 1
 
-    idf = {noun: log(N / cnt) + 1 for noun, cnt in df_count.items()}
+    idf = {noun: log(N / cnt, 2) + 1 for noun, cnt in df_count.items()}
 
     # TF-IDF は movie_ids の映画のみ返す
     movie_tfidf: dict[str, dict] = {}
