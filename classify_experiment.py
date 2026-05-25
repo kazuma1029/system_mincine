@@ -344,14 +344,14 @@ def main():
         print(f"\n{'='*60}")
         print(f"[min_movie_count = {min_n}]")
 
-        print("\n[allmodels]")
-        df_summary, df_detail = evaluate_allmodels(min_n, reviewer_ids)
+        print("\n[svmmodels]")
+        df_summary, df_detail = evaluate_svmmodels(min_n, reviewer_ids)
         if not df_summary.empty:
-            df_summary.to_excel(OUTPUT_DIR / f"results_allmodels_{min_n}.xlsx", index=False)
-            print(f"  → 保存: results_allmodels_{min_n}.xlsx")
+            df_summary.to_excel(OUTPUT_DIR / f"results_svmmodels_{min_n}.xlsx", index=False)
+            print(f"  → 保存: results_svmmodels_{min_n}.xlsx")
         if not df_detail.empty:
-            df_detail.to_csv(OUTPUT_DIR / f"detail_allmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
-            print(f"  → 保存: detail_allmodels_{min_n}.csv")
+            df_detail.to_csv(OUTPUT_DIR / f"detail_svmmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
+            print(f"  → 保存: detail_svmmodels_{min_n}.csv")
 
         print("\n[nounmodels]")
         df_summary, df_detail = evaluate_nounmodels(min_n, reviewer_ids)
@@ -362,14 +362,14 @@ def main():
             df_detail.to_csv(OUTPUT_DIR / f"detail_nounmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
             print(f"  → 保存: detail_nounmodels_{min_n}.csv")
 
-        print("\n[svmmodels]")
-        df_summary, df_detail = evaluate_svmmodels(min_n, reviewer_ids)
+        print("\n[allmodels]")
+        df_summary, df_detail = evaluate_allmodels(min_n, reviewer_ids)
         if not df_summary.empty:
-            df_summary.to_excel(OUTPUT_DIR / f"results_svmmodels_{min_n}.xlsx", index=False)
-            print(f"  → 保存: results_svmmodels_{min_n}.xlsx")
+            df_summary.to_excel(OUTPUT_DIR / f"results_allmodels_{min_n}.xlsx", index=False)
+            print(f"  → 保存: results_allmodels_{min_n}.xlsx")
         if not df_detail.empty:
-            df_detail.to_csv(OUTPUT_DIR / f"detail_svmmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
-            print(f"  → 保存: detail_svmmodels_{min_n}.csv")
+            df_detail.to_csv(OUTPUT_DIR / f"detail_allmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
+            print(f"  → 保存: detail_allmodels_{min_n}.csv")
 
     print("\n[DONE]")
 
