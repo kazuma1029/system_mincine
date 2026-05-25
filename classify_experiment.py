@@ -32,7 +32,7 @@ from transformers import BertForSequenceClassification, BertJapaneseTokenizer
 
 BASE_DIR       = Path(__file__).parent
 EXPERIMENT_DIR = BASE_DIR / "experiment_all"
-MODELS_DIR     = Path(r"C:\Users\Oyabu\Google ドライブ ストリーミング\マイドライブ\models")
+MODELS_DIR     = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\models")
 OUTPUT_DIR     = BASE_DIR / "results"
 
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
