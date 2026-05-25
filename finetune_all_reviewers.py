@@ -45,7 +45,7 @@ from transformers import (
 BASE_DIR    = Path(__file__).parent
 SUMMARY_PATH     = BASE_DIR / "reviewer_summary.xlsx"
 POSINEGA_DIR     = BASE_DIR / "reviews_posinega"
-MODELS_DIR       = BASE_DIR / "models"
+MODELS_DIR     = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
 RANKINGS_DIR     = BASE_DIR / "score_rankings"
 # LOG_DIR          = "C:/Users/kazuma/logs"
 LOG_DIR          = "C:/Users/Oyabu/research/logs"
@@ -107,33 +107,19 @@ def load_positive_sentences(movie_ids: list) -> list[str]:
             print(f"  [WARN] {path.name}: {e}")
     return sentences
 
-# ── TF-IDF 名詞スコア（nounF.py の手法） ─────────────────────────────────────
+# ── TF-IDF 名詞スコア（svmmodels と同じ式） ──────────────────────────────────
 
-def calculate_tfidf(all_noun_lists: list, total_movies: int):
-    term_movie_count = Counter()
-    tf_values        = []
-
-    for noun_list in all_noun_lists:
-        doc_terms = Counter()
-        for nouns_str in noun_list:
-            doc_terms.update(nouns_str.split())
-        tf_values.append(doc_terms)
-        for term in set(doc_terms):
-            term_movie_count[term] += 1
-
-    idf = {t: log(total_movies / (1 + c)) for t, c in term_movie_count.items()}
-    tfidf_scores = [{t: v * idf[t] for t, v in tf.items()} for tf in tf_values]
-    return tfidf_scores
-
-
-def extract_reviews_and_scores(movie_ids: list) -> tuple[list[str], Counter]:
+def extract_reviews_and_scores(
+    movie_ids: list,
+    all_movie_ids: list | None = None,
+) -> tuple[list[tuple[str, str]], dict]:
     """
     reviews_posinega から polarity==1 文を取得し、
-    TF-IDF 名詞スコア辞書を返す。
+    _build_movie_tfidf と同じ式（式5.1, 5.2）で映画単位TF-IDFを計算して返す。
+    N・df は all_movie_ids（指定時、好み＋好みでない統合）から計算する。
+    戻り値: ([(review, movie_id), ...], {movie_id: {noun: tfidf}})
     """
-    tagger      = Tagger()
-    all_reviews = []
-    all_nouns   = []      # 映画ごとの名詞リスト
+    reviews_with_movie: list[tuple[str, str]] = []
 
     for movie_id in movie_ids:
         path = POSINEGA_DIR / f"{movie_id}.xlsx"
@@ -142,38 +128,28 @@ def extract_reviews_and_scores(movie_ids: list) -> tuple[list[str], Counter]:
         try:
             df = pd.read_excel(path, header=None)
             pos_reviews = df[df.iloc[:, 1] == 1].iloc[:, 0].dropna().tolist()
-            movie_nouns = []
             for review in pos_reviews:
                 review = str(review).strip()
-                if not review:
-                    continue
-                nouns_str = " ".join(
-                    w.surface for w in tagger(review) if "名詞" in w.feature
-                )
-                if nouns_str:
-                    all_reviews.append(review)
-                    movie_nouns.append(nouns_str)
-            if movie_nouns:
-                all_nouns.append(movie_nouns)
+                if review:
+                    reviews_with_movie.append((review, movie_id))
         except Exception as e:
             print(f"  [WARN] {path.name}: {e}")
 
-    total_scores: Counter = Counter()
-    if all_nouns:
-        tfidf_list = calculate_tfidf(all_nouns, total_movies=len(movie_ids))
-        for doc_scores in tfidf_list:
-            total_scores.update(doc_scores)
-
-    return all_reviews, total_scores
+    movie_tfidf = _build_movie_tfidf(movie_ids, all_movie_ids=all_movie_ids)
+    return reviews_with_movie, movie_tfidf
 
 
-def score_reviews(reviews: list[str], total_scores: Counter) -> list[tuple[str, float]]:
-    """各レビュー文に名詞TF-IDFスコアの合計を付与する。"""
+def score_reviews(
+    reviews_with_movie: list[tuple[str, str]],
+    movie_tfidf: dict,
+) -> list[tuple[str, float]]:
+    """各レビュー文にその映画のTF-IDFスコアの合計を付与する。"""
     tagger = Tagger()
     result = []
-    for review in reviews:
+    for review, movie_id in reviews_with_movie:
+        tfidf = movie_tfidf.get(movie_id, {})
         s = sum(
-            total_scores.get(w.surface, 0)
+            tfidf.get(w.surface, 0.0)
             for w in tagger(review) if "名詞" in w.feature
         )
         result.append((review, s))
@@ -204,18 +180,21 @@ def save_ranking_xlsx(reviewer_id: int, liked_scored: list, disliked_scored: lis
 
 # ── SVM ファインチューニング ──────────────────────────────────────────────────
 
-def _build_movie_tfidf(movie_ids: list) -> dict:
+def _build_movie_tfidf(movie_ids: list, all_movie_ids: list | None = None) -> dict:
     """
     論文 式5.1, 5.2 に従って映画単位のTF-IDFを計算する。
-    文書 d = 映画 m の polarity==1 レビュー全文の集合（名詞のみ対象）
-      tf(t, d) = n_{t,d} / Σ_{s∈d} n_{s,d}
-      idf(t)   = log(N / df(t)) + 1
-    戻り値: {movie_id: {noun: tfidf_value}}
+    tf(t, d) = n_{t,d} / Σ_{s∈d} n_{s,d}
+    idf(t)   = log(N / df(t)) + 1
+    N・df は all_movie_ids（指定時）または movie_ids から計算する。
+    戻り値: {movie_id: {noun: tfidf_value}}  ← movie_ids の映画のみ
     """
     tagger = Tagger()
-    movie_noun_counts: dict[str, Counter] = {}
+    idf_ids = list(all_movie_ids) if all_movie_ids is not None else list(movie_ids)
 
-    for movie_id in movie_ids:
+    # TF・IDF 計算に必要な全映画を一括読み込み
+    needed = set(movie_ids) | set(idf_ids)
+    movie_noun_counts: dict[str, Counter] = {}
+    for movie_id in needed:
         path = POSINEGA_DIR / f"{movie_id}.xlsx"
         if not path.exists():
             continue
@@ -235,23 +214,29 @@ def _build_movie_tfidf(movie_ids: list) -> dict:
         except Exception as e:
             print(f"  [WARN] {movie_id}: {e}")
 
-    N = len(movie_noun_counts)
+    # N・df は idf_ids（好み＋好みでない統合）の映画から計算
+    N = sum(1 for mid in idf_ids if mid in movie_noun_counts)
     if N == 0:
         return {}
 
     df_count: Counter = Counter()
-    for noun_count in movie_noun_counts.values():
-        for noun in noun_count:
-            df_count[noun] += 1
+    for mid in idf_ids:
+        if mid in movie_noun_counts:
+            for noun in movie_noun_counts[mid]:
+                df_count[noun] += 1
 
     idf = {noun: log(N / cnt) + 1 for noun, cnt in df_count.items()}
 
+    # TF-IDF は movie_ids の映画のみ返す
     movie_tfidf: dict[str, dict] = {}
-    for movie_id, noun_count in movie_noun_counts.items():
-        total = sum(noun_count.values())
+    for movie_id in movie_ids:
+        nc = movie_noun_counts.get(movie_id)
+        if nc is None:
+            continue
+        total = sum(nc.values())
         movie_tfidf[movie_id] = {
-            noun: (cnt / total) * idf[noun]
-            for noun, cnt in noun_count.items()
+            noun: (cnt / total) * idf.get(noun, 0.0)
+            for noun, cnt in nc.items()
         }
     return movie_tfidf
 
@@ -302,17 +287,18 @@ def finetune_svm(
     model_dir = MODELS_DIR / str(min_movie_count) / "svmmodels" / str(reviewer_id)
     if model_dir.exists():
         print(f"  [SKIP] 既存モデル: {model_dir}")
-        return
+        return None
 
-    liked_tfidf    = _build_movie_tfidf(liked_ids)
-    disliked_tfidf = _build_movie_tfidf(disliked_ids)
+    all_ids        = liked_ids + disliked_ids
+    liked_tfidf    = _build_movie_tfidf(liked_ids,    all_movie_ids=all_ids)
+    disliked_tfidf = _build_movie_tfidf(disliked_ids, all_movie_ids=all_ids)
 
     liked_vecs    = _extract_review_vectors(liked_ids,    liked_tfidf)
     disliked_vecs = _extract_review_vectors(disliked_ids, disliked_tfidf)
 
     if not liked_vecs or not disliked_vecs:
         print(f"  [SKIP] reviewer {reviewer_id}: 正例または負例が 0 件")
-        return
+        return None
 
     print(f"  正例: {len(liked_vecs):,}  負例: {len(disliked_vecs):,}")
 
@@ -338,7 +324,10 @@ def finetune_svm(
         test_labels, preds, average="binary", zero_division=0
     )
     acc = accuracy_score(test_labels, preds)
-    print(f"  評価結果: accuracy={acc:.4f}, f1={f1:.4f}, precision={precision:.4f}, recall={recall:.4f}")
+    m = {"accuracy": round(acc, 4), "precision": round(float(precision), 4),
+         "recall": round(float(recall), 4), "f1": round(float(f1), 4)}
+    print(f"  評価結果: {m}")
+    return m
 
 
 # ── BERT ファインチューニング ──────────────────────────────────────────────────
@@ -357,7 +346,7 @@ def finetune(
     """
     if not liked_reviews or not disliked_reviews:
         print(f"  [SKIP] reviewer {reviewer_id}: 正例または負例が 0 件")
-        return
+        return None
 
     # ── モデル保存先 ──
     if mode == "all":
@@ -369,7 +358,7 @@ def finetune(
 
     if Path(model_dir).exists():
         print(f"  [SKIP] 既存モデル: {model_dir}")
-        return
+        return None
 
     print(f"  正例: {len(liked_reviews):,}  負例: {len(disliked_reviews):,}")
 
@@ -420,9 +409,10 @@ def finetune(
     tokenizer.save_pretrained(model_dir)
     clean_output_directory(output_dir)
 
-    preds      = trainer.predict(test_dataset)
-    eval_res   = compute_metrics(preds)
+    preds    = trainer.predict(test_dataset)
+    eval_res = compute_metrics(preds)
     print(f"  評価結果: {eval_res}")
+    return eval_res
 
 # ── メイン ────────────────────────────────────────────────────────────────────
 
@@ -464,8 +454,10 @@ def main():
     MODELS_DIR.mkdir(exist_ok=True)
     RANKINGS_DIR.mkdir(exist_ok=True)
 
-    all_stats  = []
-    stats_path = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"
+    all_stats    = []
+    stats_path   = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"
+    all_metrics  = []
+    metrics_path = BASE_DIR / f"train_metrics_{mode_label}_{min_movie_count}.xlsx"
     MAX_REVIEWER_ID = 250
     total_reviewers = len(pref)
     for idx, row in pref.iterrows():
@@ -501,6 +493,10 @@ def main():
             all_stats.append(entry)
             pd.DataFrame(all_stats).to_excel(stats_path, index=False)
 
+        def append_and_save_metrics(entry: dict):
+            all_metrics.append(entry)
+            pd.DataFrame(all_metrics).to_excel(metrics_path, index=False)
+
         if mode_label == "svm":
             liked_reviews    = load_positive_sentences(liked_ids)
             disliked_reviews = load_positive_sentences(disliked_ids)
@@ -512,12 +508,14 @@ def main():
                 "liked_review_count":    len(liked_reviews),
                 "disliked_review_count": len(disliked_reviews),
             })
-            finetune_svm(
+            m = finetune_svm(
                 reviewer_id     = reviewer_id,
                 liked_ids       = liked_ids,
                 disliked_ids    = disliked_ids,
                 min_movie_count = min_movie_count,
             )
+            if m:
+                append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "svm", **m})
         elif mode_label == "all":
             liked_reviews    = load_positive_sentences(liked_ids)
             disliked_reviews = load_positive_sentences(disliked_ids)
@@ -529,29 +527,32 @@ def main():
                 "liked_review_count":    len(liked_reviews),
                 "disliked_review_count": len(disliked_reviews),
             })
-            finetune(
+            m = finetune(
                 reviewer_id      = reviewer_id,
                 liked_reviews    = liked_reviews,
                 disliked_reviews = disliked_reviews,
                 mode             = mode_label,
                 min_movie_count  = min_movie_count,
             )
+            if m:
+                append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "all", **m})
         else:  # topn
             # TF-IDF スコアを一度だけ計算してN値ごとに再利用
-            liked_reviews_all,    liked_scores    = extract_reviews_and_scores(liked_ids)
-            disliked_reviews_all, disliked_scores = extract_reviews_and_scores(disliked_ids)
+            all_ids = liked_ids + disliked_ids
+            liked_reviews_with_movie,    liked_tfidf    = extract_reviews_and_scores(liked_ids,    all_movie_ids=all_ids)
+            disliked_reviews_with_movie, disliked_tfidf = extract_reviews_and_scores(disliked_ids, all_movie_ids=all_ids)
 
             append_and_save_stats({
                 "reviewer_id":           reviewer_id,
                 "reviewer_name":         reviewer_name,
                 "liked_movie_count":     len(liked_ids),
                 "disliked_movie_count":  len(disliked_ids),
-                "liked_review_count":    len(liked_reviews_all),
-                "disliked_review_count": len(disliked_reviews_all),
+                "liked_review_count":    len(liked_reviews_with_movie),
+                "disliked_review_count": len(disliked_reviews_with_movie),
             })
 
-            liked_scored    = score_reviews(liked_reviews_all,    liked_scores)
-            disliked_scored = score_reviews(disliked_reviews_all, disliked_scores)
+            liked_scored    = score_reviews(liked_reviews_with_movie,    liked_tfidf)
+            disliked_scored = score_reviews(disliked_reviews_with_movie, disliked_tfidf)
 
             liked_scored.sort(key=lambda x: x[1],    reverse=True)
             disliked_scored.sort(key=lambda x: x[1], reverse=True)
@@ -565,7 +566,7 @@ def main():
                           f"(正例: {len(liked_scored)}, 負例: {len(disliked_scored)})")
                     break
                 print(f"  [N={top_n}]")
-                finetune(
+                m = finetune(
                     reviewer_id      = reviewer_id,
                     liked_reviews    = [r for r, _ in liked_scored[:top_n]],
                     disliked_reviews = [r for r, _ in disliked_scored[:top_n]],
@@ -573,6 +574,8 @@ def main():
                     min_movie_count  = min_movie_count,
                     top_n            = top_n,
                 )
+                if m:
+                    append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "topn", "top_n": top_n, **m})
 
     print("\n[DONE] 全レビュワーのファインチューニングが完了しました。")
 
