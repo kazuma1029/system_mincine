@@ -1,5 +1,7 @@
 models/
 output/
 reviews/
+results/
 reviews_posinega/
+experiment_all/
 reviews_posinega.py
