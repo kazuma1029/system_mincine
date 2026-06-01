@@ -19,6 +19,7 @@ reviews/{movie_id}.xlsx の全レビューから映画データベースを構�
 """
 
 import joblib
+import multiprocessing
 from collections import Counter
 from math import log
 from pathlib import Path
@@ -32,11 +33,37 @@ BASE_DIR    = Path(__file__).parent
 REVIEWS_DIR = BASE_DIR / "reviews"
 OUTPUT_DIR  = BASE_DIR / "movie_database"
 
+# ── ワーカー ──────────────────────────────────────────────────────────────────
+
+_tagger: Tagger | None = None
+
+def _init_worker():
+    global _tagger
+    _tagger = Tagger()
+
+def _process_file(path: Path) -> tuple[str, Counter | None, str | None]:
+    movie_id = path.stem
+    try:
+        df = pd.read_excel(path, dtype={"review_text": str})
+        texts = df["review_text"].dropna().tolist()
+    except Exception as e:
+        return movie_id, None, str(e)
+
+    noun_count: Counter = Counter()
+    for text in texts:
+        text = str(text).strip()
+        if not text:
+            continue
+        for w in _tagger(text):
+            if "名詞" in w.feature:
+                noun_count[w.surface] += 1
+
+    return movie_id, noun_count if noun_count else None, None
+
 # ── メイン ────────────────────────────────────────────────────────────────────
 
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
-    tagger = Tagger()
 
     # ── Step 1: 全映画の名詞出現回数を集計 ──────────────────────────────────
     files = sorted(
@@ -49,30 +76,20 @@ def main():
     movie_noun_counts: dict[str, Counter] = {}
     skipped = 0
 
-    for i, path in enumerate(files, 1):
-        if i == 1 or i % 1000 == 0:
-            print(f"[INFO] {i:,}/{total_files:,}: 名詞集計中 ...")
+    num_workers = max(1, multiprocessing.cpu_count() - 1)
+    print(f"[INFO] ワーカー数: {num_workers}")
 
-        movie_id = path.stem
-        try:
-            df = pd.read_excel(path, dtype={"review_text": str})
-            texts = df["review_text"].dropna().tolist()
-        except Exception as e:
-            print(f"  [WARN] {path.name}: {e}")
-            skipped += 1
-            continue
-
-        noun_count: Counter = Counter()
-        for text in texts:
-            text = str(text).strip()
-            if not text:
-                continue
-            for w in tagger(text):
-                if "名詞" in w.feature:
-                    noun_count[w.surface] += 1
-
-        if noun_count:
-            movie_noun_counts[movie_id] = noun_count
+    with multiprocessing.Pool(processes=num_workers, initializer=_init_worker) as pool:
+        for i, (movie_id, noun_count, err) in enumerate(
+            pool.imap_unordered(_process_file, files, chunksize=4), 1
+        ):
+            if i == 1 or i % 1000 == 0:
+                print(f"[INFO] {i:,}/{total_files:,}: 名詞集計中 ...")
+            if err is not None:
+                print(f"  [WARN] {movie_id}.xlsx: {err}")
+                skipped += 1
+            elif noun_count is not None:
+                movie_noun_counts[movie_id] = noun_count
 
     N = len(movie_noun_counts)
     print(f"[INFO] 名詞データのある映画数 N = {N:,}  (スキップ: {skipped:,})")
