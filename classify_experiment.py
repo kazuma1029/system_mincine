@@ -17,8 +17,6 @@ accuracy / precision / recall / F-measure をレビュワーごとに xlsx 出�
   results/results_svmmodels_{min_n}.xlsx
 """
 
-from collections import Counter
-from math import log
 from pathlib import Path
 
 import joblib
@@ -30,10 +28,11 @@ from transformers import BertForSequenceClassification, BertJapaneseTokenizer
 
 # ── パス設定（環境に合わせて変更） ────────────────────────────────────────────
 
-BASE_DIR       = Path(__file__).parent
-EXPERIMENT_DIR = BASE_DIR / "experiment_all"
-MODELS_DIR     = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models_sentences")
-OUTPUT_DIR     = BASE_DIR / "results"
+BASE_DIR           = Path(__file__).parent
+EXPERIMENT_DIR     = BASE_DIR / "experiment_all"
+MOVIE_DATABASE_DIR = BASE_DIR / "movie_database"
+MODELS_DIR         = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models_sentences")
+OUTPUT_DIR         = BASE_DIR / "results"
 
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 32
@@ -105,54 +104,28 @@ def predict_bert(texts: list[str], model_dir: Path) -> list[int]:
     return preds
 
 
+# ── 映画データベース ──────────────────────────────────────────────────────────
+
+_movie_db_cache: dict | None = None
+
+def _load_movie_db() -> dict:
+    global _movie_db_cache
+    if _movie_db_cache is None:
+        db_path = MOVIE_DATABASE_DIR / "movie_tfidf.joblib"
+        print(f"[INFO] 映画データベースを読み込み中: {db_path}")
+        _movie_db_cache = joblib.load(db_path)
+    return _movie_db_cache
+
+
 # ── SVM 推論 ──────────────────────────────────────────────────────────────────
 
 def _build_tfidf_from_experiment(reviewer_id: int) -> dict:
     """
-    experiment_all/{reviewer_id}/{movie_id}.xlsx から映画単位のTF-IDFを計算する。
-    学習時（_build_movie_tfidf）と同じ式5.1, 5.2 を使用。
+    movie_database/movie_tfidf.joblib から映画単位のTF-IDFを返す。
+    reviewer_id は互換性のために残しているが使用しない。
     戻り値: {movie_id: {noun: tfidf_value}}
     """
-    tagger = Tagger()
-    movie_noun_counts: dict[str, Counter] = {}
-    reviewer_dir = EXPERIMENT_DIR / str(reviewer_id)
-
-    for xlsx in sorted(reviewer_dir.glob("*.xlsx")):
-        movie_id = xlsx.stem
-        try:
-            df = pd.read_excel(xlsx, header=None)
-            noun_count: Counter = Counter()
-            for text in df.iloc[:, 0].astype(str):
-                text = text.strip()
-                if not text:
-                    continue
-                for w in tagger(text):
-                    if "名詞" in w.feature:
-                        noun_count[w.surface] += 1
-            if noun_count:
-                movie_noun_counts[movie_id] = noun_count
-        except Exception as e:
-            print(f"  [WARN] {xlsx.name}: {e}")
-
-    N = len(movie_noun_counts)
-    if N == 0:
-        return {}
-
-    df_count: Counter = Counter()
-    for nc in movie_noun_counts.values():
-        for noun in nc:
-            df_count[noun] += 1
-
-    idf = {noun: log(N / cnt, 2) + 1 for noun, cnt in df_count.items()}
-
-    movie_tfidf: dict[str, dict] = {}
-    for movie_id, nc in movie_noun_counts.items():
-        total = sum(nc.values())
-        movie_tfidf[movie_id] = {
-            noun: (cnt / total) * idf[noun]
-            for noun, cnt in nc.items()
-        }
-    return movie_tfidf
+    return _load_movie_db()
 
 
 def predict_svm(texts: list[str], movie_ids: list[str],
