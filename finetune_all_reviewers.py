@@ -45,8 +45,6 @@ POSINEGA_DIR         = BASE_DIR / "reviews_posinega"
 MOVIE_DATABASE_DIR   = BASE_DIR / "movie_database"
 MODELS_DIR           = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
 RANKINGS_DIR         = BASE_DIR / "score_rankings"
-# LOG_DIR          = "C:/Users/kazuma/logs"
-LOG_DIR          = "C:/Users/Oyabu/research/logs"
 
 BERT_MODEL = "cl-tohoku/bert-base-japanese"
 
@@ -351,7 +349,7 @@ def finetune(
         per_device_eval_batch_size  = 64,
         warmup_steps                = 500,
         weight_decay                = 0.01,
-        logging_dir                 = LOG_DIR,
+        report_to                   = "none",
         logging_steps               = 10,
         eval_strategy               = "epoch",
         save_strategy               = "epoch",
