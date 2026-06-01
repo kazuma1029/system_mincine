@@ -20,8 +20,6 @@ reviews_posinega/ の polarity==1 文を使って BERT をファインチュー�
 
 import os
 import shutil
-from collections import Counter
-from math import log
 from pathlib import Path
 
 import pandas as pd
@@ -41,11 +39,12 @@ from transformers import (
 
 # ── パス設定 ──────────────────────────────────────────────────────────────────
 
-BASE_DIR    = Path(__file__).parent
-SUMMARY_PATH     = BASE_DIR / "reviewer_summary.xlsx"
-POSINEGA_DIR     = BASE_DIR / "reviews_posinega"
-MODELS_DIR     = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
-RANKINGS_DIR     = BASE_DIR / "score_rankings"
+BASE_DIR             = Path(__file__).parent
+SUMMARY_PATH         = BASE_DIR / "reviewer_summary.xlsx"
+POSINEGA_DIR         = BASE_DIR / "reviews_posinega"
+MOVIE_DATABASE_DIR   = BASE_DIR / "movie_database"
+MODELS_DIR           = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
+RANKINGS_DIR         = BASE_DIR / "score_rankings"
 # LOG_DIR          = "C:/Users/kazuma/logs"
 LOG_DIR          = "C:/Users/Oyabu/research/logs"
 
@@ -177,67 +176,29 @@ def save_ranking_xlsx(reviewer_id: int, liked_scored: list, disliked_scored: lis
     print(f"  [RANKING] 保存: {out_path}")
 
 
+# ── 映画データベース ──────────────────────────────────────────────────────────
+
+_movie_db_cache: dict | None = None
+
+def _load_movie_db() -> dict:
+    global _movie_db_cache
+    if _movie_db_cache is None:
+        db_path = MOVIE_DATABASE_DIR / "movie_tfidf.joblib"
+        print(f"[INFO] 映画データベースを読み込み中: {db_path}")
+        _movie_db_cache = joblib.load(db_path)
+    return _movie_db_cache
+
+
 # ── SVM ファインチューニング ──────────────────────────────────────────────────
 
 def _build_movie_tfidf(movie_ids: list, all_movie_ids: list | None = None) -> dict:
     """
-    論文 式5.1, 5.2 に従って映画単位のTF-IDFを計算する。
-    tf(t, d) = n_{t,d} / Σ_{s∈d} n_{s,d}
-    idf(t)   = log(N / df(t)) + 1
-    N・df は all_movie_ids（指定時）または movie_ids から計算する。
-    戻り値: {movie_id: {noun: tfidf_value}}  ← movie_ids の映画のみ
+    movie_database/movie_tfidf.joblib から指定映画のTF-IDFを返す。
+    all_movie_ids は互換性のために残しているが使用しない。
+    戻り値: {movie_id: {noun: tfidf_value}}
     """
-    tagger = Tagger()
-    idf_ids = list(all_movie_ids) if all_movie_ids is not None else list(movie_ids)
-
-    # TF・IDF 計算に必要な全映画を一括読み込み
-    needed = set(movie_ids) | set(idf_ids)
-    movie_noun_counts: dict[str, Counter] = {}
-    for movie_id in needed:
-        path = POSINEGA_DIR / f"{movie_id}.xlsx"
-        if not path.exists():
-            continue
-        try:
-            df = pd.read_excel(path, header=None)
-            pos_reviews = df[df.iloc[:, 1] == 1].iloc[:, 0].dropna().tolist()
-            noun_count: Counter = Counter()
-            for review in pos_reviews:
-                review = str(review).strip()
-                if not review:
-                    continue
-                for w in tagger(review):
-                    if "名詞" in w.feature:
-                        noun_count[w.surface] += 1
-            if noun_count:
-                movie_noun_counts[movie_id] = noun_count
-        except Exception as e:
-            print(f"  [WARN] {movie_id}: {e}")
-
-    # N・df は idf_ids（好み＋好みでない統合）の映画から計算
-    N = sum(1 for mid in idf_ids if mid in movie_noun_counts)
-    if N == 0:
-        return {}
-
-    df_count: Counter = Counter()
-    for mid in idf_ids:
-        if mid in movie_noun_counts:
-            for noun in movie_noun_counts[mid]:
-                df_count[noun] += 1
-
-    idf = {noun: log(N / cnt, 2) + 1 for noun, cnt in df_count.items()}
-
-    # TF-IDF は movie_ids の映画のみ返す
-    movie_tfidf: dict[str, dict] = {}
-    for movie_id in movie_ids:
-        nc = movie_noun_counts.get(movie_id)
-        if nc is None:
-            continue
-        total = sum(nc.values())
-        movie_tfidf[movie_id] = {
-            noun: (cnt / total) * idf.get(noun, 0.0)
-            for noun, cnt in nc.items()
-        }
-    return movie_tfidf
+    db = _load_movie_db()
+    return {mid: db[mid] for mid in movie_ids if mid in db}
 
 
 def _extract_review_vectors(movie_ids: list, movie_tfidf: dict) -> list[dict]:
