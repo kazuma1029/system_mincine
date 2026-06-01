@@ -337,10 +337,12 @@ def finetune(
     mode: str,
     min_movie_count: int = 0,
     top_n: int = 0,
+    pct: int = 0,
 ):
     """
     mode: "all"   → 全件使用   → models/{min_movie_count}/allmodels/{reviewerID}/
     mode: "topn"  → 上位N件    → models/{min_movie_count}/nounmodels/{reviewerID}/{N}/
+    mode: "pct"   → 上位N%件   → models/{min_movie_count}/nounmodels/{reviewerID}/pct{pct}/
     """
     if not liked_reviews or not disliked_reviews:
         print(f"  [SKIP] reviewer {reviewer_id}: 正例または負例が 0 件")
@@ -350,9 +352,12 @@ def finetune(
     if mode == "all":
         model_dir  = str(MODELS_DIR / str(min_movie_count) / "allmodels" / str(reviewer_id))
         output_dir = f"./output/{reviewer_id}_all"
-    else:
+    elif mode == "topn":
         model_dir  = str(MODELS_DIR / str(min_movie_count) / "nounmodels" / str(reviewer_id) / str(top_n))
         output_dir = f"./output/{reviewer_id}_noun{top_n}"
+    else:  # pct
+        model_dir  = str(MODELS_DIR / str(min_movie_count) / "pctmodels" / str(reviewer_id) / f"pct{pct}")
+        output_dir = f"./output/{reviewer_id}_pct{pct}"
 
     if Path(model_dir).exists():
         print(f"  [SKIP] 既存モデル: {model_dir}")
@@ -410,6 +415,13 @@ def finetune(
     print(f"  評価結果: {eval_res}")
     return eval_res
 
+# ── レビュー件数テキスト出力 ──────────────────────────────────────────────────
+
+def append_noun_counts(path: Path, reviewer_id: int, liked_count: int, disliked_count: int):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"reviewer_id={reviewer_id}\tliked={liked_count}\tdisliked={disliked_count}\n")
+
+
 # ── メイン ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -418,13 +430,26 @@ def main():
     print("ファインチューニングモードを選択してください")
     print("  1: SVM (linear kernel) でファインチューニング")
     print("  2: 全レビュー文で BERT をファインチューニング")
-    print("  3: TF-IDF 名詞スコア上位 N 件で BERT をファインチューニング")
+    print("  3: TF-IDF 名詞スコアで BERT をファインチューニング（nounmodels）")
     print("=" * 60)
     mode_input = input("モード (1, 2, or 3): ").strip()
     while mode_input not in ("1", "2", "3"):
         mode_input = input("1, 2, または 3 を入力してください: ").strip()
 
-    TOP_N_LIST = list(range(100, 5001, 100))  # 100, 200, ..., 5000
+    # モード3のサブモード選択
+    noun_submode = None
+    if mode_input == "3":
+        print("-" * 60)
+        print("  nounmodels サブモードを選択してください")
+        print("  1: N=100~5000（固定件数）")
+        print("  2: N=10%~90%（レビュー数に対する割合）→ pctmodels に保存")
+        print("-" * 60)
+        noun_submode = input("サブモード (1 or 2): ").strip()
+        while noun_submode not in ("1", "2"):
+            noun_submode = input("1 または 2 を入力してください: ").strip()
+
+    TOP_N_LIST   = list(range(100, 5001, 100))   # 100, 200, ..., 5000
+    PERCENT_LIST = list(range(10, 91, 10))        # 10, 20, ..., 90
 
     # ── 最小映画件数フィルタ ──
     min_n_input = input("好み・好みでない映画がそれぞれ何件以上のレビュワーを対象にしますか？（例: 10）: ").strip()
@@ -432,13 +457,20 @@ def main():
         min_n_input = input("正の整数を入力してください: ").strip()
     min_movie_count = int(min_n_input)
 
-    mode_label = {"1": "svm", "2": "all", "3": "topn"}[mode_input]
-    mode_names = {
-        "1": "SVM (linear kernel)",
-        "2": "全レビュー BERT",
-        "3": f"上位 N 件 BERT (N={TOP_N_LIST})",
-    }
-    print(f"\n[INFO] モード: {mode_names[mode_input]}")
+    if mode_input == "1":
+        mode_label = "svm"
+        mode_desc  = "SVM (linear kernel)"
+    elif mode_input == "2":
+        mode_label = "all"
+        mode_desc  = "全レビュー BERT"
+    elif noun_submode == "1":
+        mode_label = "topn"
+        mode_desc  = "nounmodels モード1: 上位 N 件 BERT (N=100~5000)"
+    else:
+        mode_label = "pct"
+        mode_desc  = "nounmodels モード2: 上位 N% BERT (10%~90%) → pctmodels"
+
+    print(f"\n[INFO] モード: {mode_desc}")
     print(f"[INFO] 対象レビュワー条件: 好み映画 >= {min_movie_count} 件 かつ 好みでない映画 >= {min_movie_count} 件\n")
 
     # ── reviewer_summary.xlsx 読み込み ──
@@ -454,6 +486,8 @@ def main():
     stats_path   = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"
     all_metrics  = []
     metrics_path = BASE_DIR / f"train_metrics_{mode_label}_{min_movie_count}.xlsx"
+    noun_mode1_counts_path = BASE_DIR / f"noun_mode1_counts_{min_movie_count}.txt"
+    noun_mode2_counts_path = BASE_DIR / f"noun_mode2_counts_{min_movie_count}.txt"
     MAX_REVIEWER_ID = 250
     total_reviewers = len(pref)
     for idx, row in pref.iterrows():
@@ -532,7 +566,7 @@ def main():
             )
             if m:
                 append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "all", **m})
-        else:  # topn
+        elif mode_label == "topn":
             # TF-IDF スコアを一度だけ計算してN値ごとに再利用
             all_ids = liked_ids + disliked_ids
             liked_reviews_with_movie,    liked_tfidf    = extract_reviews_and_scores(liked_ids,    all_movie_ids=all_ids)
@@ -566,12 +600,56 @@ def main():
                     reviewer_id      = reviewer_id,
                     liked_reviews    = [r for r, _ in liked_scored[:top_n]],
                     disliked_reviews = [r for r, _ in disliked_scored[:top_n]],
-                    mode             = mode_label,
+                    mode             = "topn",
                     min_movie_count  = min_movie_count,
                     top_n            = top_n,
                 )
                 if m:
                     append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "topn", "top_n": top_n, **m})
+
+            append_noun_counts(noun_mode1_counts_path, reviewer_id,
+                               len(liked_scored), len(disliked_scored))
+
+        elif mode_label == "pct":
+            # TF-IDF スコアを一度だけ計算してパーセンテージごとに再利用
+            all_ids = liked_ids + disliked_ids
+            liked_reviews_with_movie,    liked_tfidf    = extract_reviews_and_scores(liked_ids,    all_movie_ids=all_ids)
+            disliked_reviews_with_movie, disliked_tfidf = extract_reviews_and_scores(disliked_ids, all_movie_ids=all_ids)
+
+            append_and_save_stats({
+                "reviewer_id":           reviewer_id,
+                "reviewer_name":         reviewer_name,
+                "liked_movie_count":     len(liked_ids),
+                "disliked_movie_count":  len(disliked_ids),
+                "liked_review_count":    len(liked_reviews_with_movie),
+                "disliked_review_count": len(disliked_reviews_with_movie),
+            })
+
+            liked_scored    = score_reviews(liked_reviews_with_movie,    liked_tfidf)
+            disliked_scored = score_reviews(disliked_reviews_with_movie, disliked_tfidf)
+
+            liked_scored.sort(key=lambda x: x[1],    reverse=True)
+            disliked_scored.sort(key=lambda x: x[1], reverse=True)
+
+            save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)
+
+            for pct in PERCENT_LIST:
+                liked_n    = max(1, int(len(liked_scored)    * pct / 100))
+                disliked_n = max(1, int(len(disliked_scored) * pct / 100))
+                print(f"  [{pct}%] 正例: {liked_n:,} 件  負例: {disliked_n:,} 件")
+                m = finetune(
+                    reviewer_id      = reviewer_id,
+                    liked_reviews    = [r for r, _ in liked_scored[:liked_n]],
+                    disliked_reviews = [r for r, _ in disliked_scored[:disliked_n]],
+                    mode             = "pct",
+                    min_movie_count  = min_movie_count,
+                    pct              = pct,
+                )
+                if m:
+                    append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "pct", "pct": pct, **m})
+
+            append_noun_counts(noun_mode2_counts_path, reviewer_id,
+                               len(liked_scored), len(disliked_scored))
 
     print("\n[DONE] 全レビュワーのファインチューニングが完了しました。")
 
