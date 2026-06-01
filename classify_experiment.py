@@ -32,7 +32,7 @@ from transformers import BertForSequenceClassification, BertJapaneseTokenizer
 
 BASE_DIR       = Path(__file__).parent
 EXPERIMENT_DIR = BASE_DIR / "experiment_all"
-MODELS_DIR     = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
+MODELS_DIR     = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models_sentences")
 OUTPUT_DIR     = BASE_DIR / "results"
 
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -344,14 +344,14 @@ def main():
         print(f"\n{'='*60}")
         print(f"[min_movie_count = {min_n}]")
 
-        print("\n[svmmodels]")
-        df_summary, df_detail = evaluate_svmmodels(min_n, reviewer_ids)
-        if not df_summary.empty:
-            df_summary.to_excel(OUTPUT_DIR / f"results_svmmodels_{min_n}.xlsx", index=False)
-            print(f"  → 保存: results_svmmodels_{min_n}.xlsx")
-        if not df_detail.empty:
-            df_detail.to_csv(OUTPUT_DIR / f"detail_svmmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
-            print(f"  → 保存: detail_svmmodels_{min_n}.csv")
+        # print("\n[svmmodels]")
+        # df_summary, df_detail = evaluate_svmmodels(min_n, reviewer_ids)
+        # if not df_summary.empty:
+        #     df_summary.to_excel(OUTPUT_DIR / f"results_svmmodels_{min_n}.xlsx", index=False)
+        #     print(f"  → 保存: results_svmmodels_{min_n}.xlsx")
+        # if not df_detail.empty:
+        #     df_detail.to_csv(OUTPUT_DIR / f"detail_svmmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
+        #     print(f"  → 保存: detail_svmmodels_{min_n}.csv")
 
         print("\n[nounmodels]")
         df_summary, df_detail = evaluate_nounmodels(min_n, reviewer_ids)

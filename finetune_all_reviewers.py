@@ -35,7 +35,6 @@ from torch.utils.data import Dataset
 from transformers import (
     BertForSequenceClassification,
     BertJapaneseTokenizer,
-    DataCollatorWithPadding,
     Trainer,
     TrainingArguments,
 )
@@ -267,8 +266,7 @@ def _extract_review_vectors(movie_ids: list, movie_tfidf: dict) -> list[dict]:
                     for w in tagger(review)
                     if "名詞" in w.feature and w.surface in tfidf
                 }
-                if vec:
-                    vectors.append(vec)
+                vectors.append(vec if vec else {"__empty__": 0.0})
         except Exception as e:
             print(f"  [WARN] {movie_id}: {e}")
     return vectors
@@ -308,11 +306,11 @@ def finetune_svm(
     test_vecs   = all_vecs[:10]
     test_labels = all_labels[:10]
 
-    dv = DictVectorizer(sparse=True)
+    dv = DictVectorizer()
     X_train = dv.fit_transform(all_vecs)
     X_test  = dv.transform(test_vecs)
 
-    clf = LinearSVC(random_state=42, max_iter=2000)
+    clf = LinearSVC(C=1, max_iter=10000)
     clf.fit(X_train, all_labels)
 
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -368,18 +366,17 @@ def finetune(
     test_texts  = all_texts[:10]
     test_labels = all_labels[:10]
 
-    set_seed(42)
-
     tokenizer = BertJapaneseTokenizer.from_pretrained(BERT_MODEL)
-    model     = BertForSequenceClassification.from_pretrained(BERT_MODEL, num_labels=2)
 
-    # padding=False でトークナイズし、バッチ単位で動的パディング（メモリ節約）
-    train_enc = tokenizer(all_texts,  truncation=True, padding=False, max_length=512)
-    test_enc  = tokenizer(test_texts, truncation=True, padding=False, max_length=512)
+    train_enc = tokenizer(all_texts,  truncation=True, padding=True, max_length=512)
+    test_enc  = tokenizer(test_texts, truncation=True, padding=True, max_length=512)
 
     train_dataset = MovieReviewDataset(train_enc, all_labels)
     test_dataset  = MovieReviewDataset(test_enc,  test_labels)
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+    set_seed(42)
+
+    model = BertForSequenceClassification.from_pretrained(BERT_MODEL, num_labels=2)
 
     training_args = TrainingArguments(
         output_dir                  = output_dir,
@@ -401,7 +398,6 @@ def finetune(
         train_dataset   = train_dataset,
         eval_dataset    = test_dataset,
         compute_metrics = compute_metrics,
-        data_collator   = data_collator,
     )
 
     trainer.train()
