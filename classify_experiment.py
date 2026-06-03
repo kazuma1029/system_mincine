@@ -1,20 +1,21 @@
 # classify_experiment.py
 # -*- coding: utf-8 -*-
 """
-experiment_all/{reviewer_id}/{movie_id}.xlsx のレビューを
-allmodels・nounmodels・svmmodels で分類し、
+experiment_all/{reviewer_id}/{movie_id}.xlsx のレビューを各モデルで分類し、
 accuracy / precision / recall / F-measure をレビュワーごとに xlsx 出力する。
 
+モード:
+  1: SVM (svmmodels)                          → results/results_svmmodels_{min_n}.xlsx
+  2: 全レビュー BERT (allmodels)              → results/results_allmodels_{min_n}.xlsx
+  3: TF-IDF 上位N件 BERT (nounmodels)        → results/results_nounmodels_{min_n}.xlsx
+  4: TF-IDF 上位N% BERT (pctmodels)          → results/results_pctmodels_{min_n}.xlsx
+
 ディレクトリ構成（想定）:
-  experiment_all/{reviewer_id}/{movie_id}.xlsx  列0=レビュー文, 列1=評価値
+  experiment_all/{reviewer_id}/{movie_id}.xlsx
+  {MODELS_DIR}/{min_n}/svmmodels/{reviewer_id}/
   {MODELS_DIR}/{min_n}/allmodels/{reviewer_id}/
   {MODELS_DIR}/{min_n}/nounmodels/{reviewer_id}/{N}/
-  {MODELS_DIR}/{min_n}/svmmodels/{reviewer_id}/
-
-出力:
-  results/results_allmodels_{min_n}.xlsx
-  results/results_nounmodels_{min_n}.xlsx
-  results/results_svmmodels_{min_n}.xlsx
+  {MODELS_DIR}/{min_n}/pctmodels/{reviewer_id}/pct{pct}/
 """
 
 from pathlib import Path
@@ -299,10 +300,83 @@ def evaluate_svmmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFram
     return pd.DataFrame(summary_rows), pd.DataFrame(detail_rows)
 
 
+def evaluate_pctmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    summary_rows = []
+    detail_rows  = []
+    model_base   = MODELS_DIR / str(min_n) / "pctmodels"
+    if not model_base.exists():
+        return pd.DataFrame(), pd.DataFrame()
+
+    for rid in reviewer_ids:
+        reviewer_model_dir = model_base / str(rid)
+        if not reviewer_model_dir.exists():
+            continue
+        exp_dir = EXPERIMENT_DIR / str(rid)
+        if not exp_dir.exists():
+            continue
+        try:
+            texts, ratings, movie_ids = load_experiment(rid)
+            if not texts:
+                continue
+            labels = make_labels(ratings)
+        except Exception as e:
+            print(f"  [WARN] reviewer {rid} データ読み込み失敗: {e}")
+            continue
+
+        pct_dirs = sorted(
+            [p for p in reviewer_model_dir.iterdir()
+             if p.is_dir() and p.name.startswith("pct") and p.name[3:].isdigit()],
+            key=lambda p: int(p.name[3:]),
+        )
+        for pct_dir in pct_dirs:
+            pct = int(pct_dir.name[3:])
+            try:
+                preds = predict_bert(texts, pct_dir)
+                m     = compute_metrics(labels, preds)
+                summary_rows.append({"reviewer_id": rid, "pct": pct, **m})
+                for text, movie_id, rating, true_label, pred_label in zip(
+                        texts, movie_ids, ratings, labels, preds):
+                    detail_rows.append({
+                        "reviewer_id": rid,
+                        "pct":         pct,
+                        "movie_id":    movie_id,
+                        "review":      text,
+                        "rating":      rating,
+                        "true_label":  true_label,
+                        "pred_label":  pred_label,
+                    })
+                print(f"  reviewer {rid} pct={pct}%: {m}")
+            except Exception as e:
+                print(f"  [WARN] reviewer {rid} pct={pct}%: {e}")
+
+    return pd.DataFrame(summary_rows), pd.DataFrame(detail_rows)
+
+
 # ── メイン ────────────────────────────────────────────────────────────────────
 
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
+
+    # ── モード選択 ──
+    print("=" * 60)
+    print("分類モードを選択してください")
+    print("  1: SVM モデルで分類            (svmmodels)")
+    print("  2: 全レビュー BERT で分類      (allmodels)")
+    print("  3: TF-IDF 上位N件 BERT で分類  (nounmodels)")
+    print("  4: TF-IDF 上位N%  BERT で分類  (pctmodels)")
+    print("=" * 60)
+    mode_input = input("モード (1/2/3/4): ").strip()
+    while mode_input not in ("1", "2", "3", "4"):
+        mode_input = input("1, 2, 3, または 4 を入力してください: ").strip()
+    mode = int(mode_input)
+
+    mode_label = {1: "svmmodels", 2: "allmodels", 3: "nounmodels", 4: "pctmodels"}[mode]
+    evaluate_fn = {
+        1: evaluate_svmmodels,
+        2: evaluate_allmodels,
+        3: evaluate_nounmodels,
+        4: evaluate_pctmodels,
+    }[mode]
 
     min_counts   = find_min_movie_counts()
     reviewer_ids = reviewer_ids_in_experiment()
@@ -310,39 +384,24 @@ def main():
     if not min_counts:
         print("[ERROR] modelsディレクトリ内にmin_movie_countディレクトリが見つかりません。")
         return
+    print(f"\n[INFO] モード: {mode_label}")
     print(f"[INFO] min_movie_count: {min_counts}")
     print(f"[INFO] 対象レビュワー数: {len(reviewer_ids)}")
 
     for min_n in min_counts:
         print(f"\n{'='*60}")
-        print(f"[min_movie_count = {min_n}]")
+        print(f"[min_movie_count = {min_n}]  [{mode_label}]")
 
-        # print("\n[svmmodels]")
-        # df_summary, df_detail = evaluate_svmmodels(min_n, reviewer_ids)
-        # if not df_summary.empty:
-        #     df_summary.to_excel(OUTPUT_DIR / f"results_svmmodels_{min_n}.xlsx", index=False)
-        #     print(f"  → 保存: results_svmmodels_{min_n}.xlsx")
-        # if not df_detail.empty:
-        #     df_detail.to_csv(OUTPUT_DIR / f"detail_svmmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
-        #     print(f"  → 保存: detail_svmmodels_{min_n}.csv")
+        df_summary, df_detail = evaluate_fn(min_n, reviewer_ids)
 
-        print("\n[nounmodels]")
-        df_summary, df_detail = evaluate_nounmodels(min_n, reviewer_ids)
         if not df_summary.empty:
-            df_summary.to_excel(OUTPUT_DIR / f"results_nounmodels_{min_n}.xlsx", index=False)
-            print(f"  → 保存: results_nounmodels_{min_n}.xlsx")
+            out = OUTPUT_DIR / f"results_{mode_label}_{min_n}.xlsx"
+            df_summary.to_excel(out, index=False)
+            print(f"  → 保存: {out.name}")
         if not df_detail.empty:
-            df_detail.to_csv(OUTPUT_DIR / f"detail_nounmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
-            print(f"  → 保存: detail_nounmodels_{min_n}.csv")
-
-        print("\n[allmodels]")
-        df_summary, df_detail = evaluate_allmodels(min_n, reviewer_ids)
-        if not df_summary.empty:
-            df_summary.to_excel(OUTPUT_DIR / f"results_allmodels_{min_n}.xlsx", index=False)
-            print(f"  → 保存: results_allmodels_{min_n}.xlsx")
-        if not df_detail.empty:
-            df_detail.to_csv(OUTPUT_DIR / f"detail_allmodels_{min_n}.csv", index=False, encoding="utf-8-sig")
-            print(f"  → 保存: detail_allmodels_{min_n}.csv")
+            out = OUTPUT_DIR / f"detail_{mode_label}_{min_n}.csv"
+            df_detail.to_csv(out, index=False, encoding="utf-8-sig")
+            print(f"  → 保存: {out.name}")
 
     print("\n[DONE]")
 
