@@ -82,6 +82,28 @@ def compute_metrics(y_true: list[int], y_pred: list[int]) -> dict:
             "recall": round(r, 4), "f1": round(f1, 4)}
 
 
+# ── 増分保存ヘルパー ──────────────────────────────────────────────────────────
+
+def _load_existing_df(path: Path) -> pd.DataFrame:
+    if path.exists():
+        try:
+            if path.suffix == ".xlsx":
+                return pd.read_excel(path)
+            else:
+                return pd.read_csv(path, encoding="utf-8-sig")
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
+def _save_df(df: pd.DataFrame, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".xlsx":
+        df.to_excel(path, index=False)
+    else:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+
+
 # ── BERT 推論 ─────────────────────────────────────────────────────────────────
 
 def predict_bert(texts: list[str], model_dir: Path) -> list[int]:
@@ -172,14 +194,20 @@ def reviewer_ids_in_experiment() -> list[int]:
 
 # ── 評価ループ ────────────────────────────────────────────────────────────────
 
-def evaluate_allmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    summary_rows = []
-    detail_rows  = []
-    model_base   = MODELS_DIR / str(min_n) / "allmodels"
+def evaluate_allmodels(min_n: int, reviewer_ids: list[int],
+                       out_summary: Path, out_detail: Path) -> None:
+    model_base = MODELS_DIR / str(min_n) / "allmodels"
     if not model_base.exists():
-        return pd.DataFrame(), pd.DataFrame()
+        return
+
+    df_summary = _load_existing_df(out_summary)
+    df_detail  = _load_existing_df(out_detail)
+    done_ids   = set(df_summary["reviewer_id"].tolist()) if not df_summary.empty else set()
 
     for rid in reviewer_ids:
+        if rid in done_ids:
+            print(f"  [SKIP] reviewer {rid}: 既存結果あり")
+            continue
         model_dir = model_base / str(rid)
         if not model_dir.exists():
             continue
@@ -193,30 +221,30 @@ def evaluate_allmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFram
             labels = make_labels(ratings)
             preds  = predict_bert(texts, model_dir)
             m      = compute_metrics(labels, preds)
-            summary_rows.append({"reviewer_id": rid, **m})
-            for text, movie_id, rating, true_label, pred_label in zip(
-                    texts, movie_ids, ratings, labels, preds):
-                detail_rows.append({
-                    "reviewer_id": rid,
-                    "movie_id":    movie_id,
-                    "review":      text,
-                    "rating":      rating,
-                    "true_label":  true_label,
-                    "pred_label":  pred_label,
-                })
+            df_summary = pd.concat([df_summary, pd.DataFrame([{"reviewer_id": rid, **m}])],
+                                   ignore_index=True)
+            df_detail  = pd.concat([df_detail, pd.DataFrame([
+                {"reviewer_id": rid, "movie_id": mid, "review": t,
+                 "rating": r, "true_label": tl, "pred_label": pl}
+                for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
+            ])], ignore_index=True)
+            _save_df(df_summary, out_summary)
+            _save_df(df_detail,  out_detail)
             print(f"  reviewer {rid}: {m}")
         except Exception as e:
             print(f"  [WARN] reviewer {rid}: {e}")
 
-    return pd.DataFrame(summary_rows), pd.DataFrame(detail_rows)
 
-
-def evaluate_nounmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    summary_rows = []
-    detail_rows  = []
-    model_base   = MODELS_DIR / str(min_n) / "nounmodels"
+def evaluate_nounmodels(min_n: int, reviewer_ids: list[int],
+                        out_summary: Path, out_detail: Path) -> None:
+    model_base = MODELS_DIR / str(min_n) / "nounmodels"
     if not model_base.exists():
-        return pd.DataFrame(), pd.DataFrame()
+        return
+
+    df_summary = _load_existing_df(out_summary)
+    df_detail  = _load_existing_df(out_detail)
+    done_keys  = (set(zip(df_summary["reviewer_id"], df_summary["top_n"]))
+                  if not df_summary.empty else set())
 
     for rid in reviewer_ids:
         reviewer_model_dir = model_base / str(rid)
@@ -239,36 +267,41 @@ def evaluate_nounmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFra
             if not n_dir.name.isdigit():
                 continue
             top_n = int(n_dir.name)
+            if (rid, top_n) in done_keys:
+                print(f"  [SKIP] reviewer {rid} N={top_n}: 既存結果あり")
+                continue
             try:
                 preds = predict_bert(texts, n_dir)
                 m     = compute_metrics(labels, preds)
-                summary_rows.append({"reviewer_id": rid, "top_n": top_n, **m})
-                for text, movie_id, rating, true_label, pred_label in zip(
-                        texts, movie_ids, ratings, labels, preds):
-                    detail_rows.append({
-                        "reviewer_id": rid,
-                        "top_n":       top_n,
-                        "movie_id":    movie_id,
-                        "review":      text,
-                        "rating":      rating,
-                        "true_label":  true_label,
-                        "pred_label":  pred_label,
-                    })
+                df_summary = pd.concat([df_summary, pd.DataFrame([
+                    {"reviewer_id": rid, "top_n": top_n, **m}
+                ])], ignore_index=True)
+                df_detail  = pd.concat([df_detail, pd.DataFrame([
+                    {"reviewer_id": rid, "top_n": top_n, "movie_id": mid,
+                     "review": t, "rating": r, "true_label": tl, "pred_label": pl}
+                    for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
+                ])], ignore_index=True)
+                _save_df(df_summary, out_summary)
+                _save_df(df_detail,  out_detail)
                 print(f"  reviewer {rid} N={top_n}: {m}")
             except Exception as e:
                 print(f"  [WARN] reviewer {rid} N={top_n}: {e}")
 
-    return pd.DataFrame(summary_rows), pd.DataFrame(detail_rows)
 
-
-def evaluate_svmmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    summary_rows = []
-    detail_rows  = []
-    model_base   = MODELS_DIR / str(min_n) / "svmmodels"
+def evaluate_svmmodels(min_n: int, reviewer_ids: list[int],
+                       out_summary: Path, out_detail: Path) -> None:
+    model_base = MODELS_DIR / str(min_n) / "svmmodels"
     if not model_base.exists():
-        return pd.DataFrame(), pd.DataFrame()
+        return
+
+    df_summary = _load_existing_df(out_summary)
+    df_detail  = _load_existing_df(out_detail)
+    done_ids   = set(df_summary["reviewer_id"].tolist()) if not df_summary.empty else set()
 
     for rid in reviewer_ids:
+        if rid in done_ids:
+            print(f"  [SKIP] reviewer {rid}: 既存結果あり")
+            continue
         model_dir = model_base / str(rid)
         if not model_dir.exists():
             continue
@@ -282,30 +315,30 @@ def evaluate_svmmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFram
             labels = make_labels(ratings)
             preds  = predict_svm(texts, movie_ids, rid, model_dir)
             m      = compute_metrics(labels, preds)
-            summary_rows.append({"reviewer_id": rid, **m})
-            for text, movie_id, rating, true_label, pred_label in zip(
-                    texts, movie_ids, ratings, labels, preds):
-                detail_rows.append({
-                    "reviewer_id": rid,
-                    "movie_id":    movie_id,
-                    "review":      text,
-                    "rating":      rating,
-                    "true_label":  true_label,
-                    "pred_label":  pred_label,
-                })
+            df_summary = pd.concat([df_summary, pd.DataFrame([{"reviewer_id": rid, **m}])],
+                                   ignore_index=True)
+            df_detail  = pd.concat([df_detail, pd.DataFrame([
+                {"reviewer_id": rid, "movie_id": mid, "review": t,
+                 "rating": r, "true_label": tl, "pred_label": pl}
+                for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
+            ])], ignore_index=True)
+            _save_df(df_summary, out_summary)
+            _save_df(df_detail,  out_detail)
             print(f"  reviewer {rid}: {m}")
         except Exception as e:
             print(f"  [WARN] reviewer {rid}: {e}")
 
-    return pd.DataFrame(summary_rows), pd.DataFrame(detail_rows)
 
-
-def evaluate_pctmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    summary_rows = []
-    detail_rows  = []
-    model_base   = MODELS_DIR / str(min_n) / "pctmodels"
+def evaluate_pctmodels(min_n: int, reviewer_ids: list[int],
+                       out_summary: Path, out_detail: Path) -> None:
+    model_base = MODELS_DIR / str(min_n) / "pctmodels"
     if not model_base.exists():
-        return pd.DataFrame(), pd.DataFrame()
+        return
+
+    df_summary = _load_existing_df(out_summary)
+    df_detail  = _load_existing_df(out_detail)
+    done_keys  = (set(zip(df_summary["reviewer_id"], df_summary["pct"]))
+                  if not df_summary.empty else set())
 
     for rid in reviewer_ids:
         reviewer_model_dir = model_base / str(rid)
@@ -330,26 +363,25 @@ def evaluate_pctmodels(min_n: int, reviewer_ids: list[int]) -> tuple[pd.DataFram
         )
         for pct_dir in pct_dirs:
             pct = int(pct_dir.name[3:])
+            if (rid, pct) in done_keys:
+                print(f"  [SKIP] reviewer {rid} pct={pct}%: 既存結果あり")
+                continue
             try:
                 preds = predict_bert(texts, pct_dir)
                 m     = compute_metrics(labels, preds)
-                summary_rows.append({"reviewer_id": rid, "pct": pct, **m})
-                for text, movie_id, rating, true_label, pred_label in zip(
-                        texts, movie_ids, ratings, labels, preds):
-                    detail_rows.append({
-                        "reviewer_id": rid,
-                        "pct":         pct,
-                        "movie_id":    movie_id,
-                        "review":      text,
-                        "rating":      rating,
-                        "true_label":  true_label,
-                        "pred_label":  pred_label,
-                    })
+                df_summary = pd.concat([df_summary, pd.DataFrame([
+                    {"reviewer_id": rid, "pct": pct, **m}
+                ])], ignore_index=True)
+                df_detail  = pd.concat([df_detail, pd.DataFrame([
+                    {"reviewer_id": rid, "pct": pct, "movie_id": mid,
+                     "review": t, "rating": r, "true_label": tl, "pred_label": pl}
+                    for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
+                ])], ignore_index=True)
+                _save_df(df_summary, out_summary)
+                _save_df(df_detail,  out_detail)
                 print(f"  reviewer {rid} pct={pct}%: {m}")
             except Exception as e:
                 print(f"  [WARN] reviewer {rid} pct={pct}%: {e}")
-
-    return pd.DataFrame(summary_rows), pd.DataFrame(detail_rows)
 
 
 # ── メイン ────────────────────────────────────────────────────────────────────
@@ -389,19 +421,11 @@ def main():
     print(f"[INFO] 対象レビュワー数: {len(reviewer_ids)}")
 
     for min_n in min_counts:
+        out_summary = OUTPUT_DIR / f"results_{mode_label}_{min_n}.xlsx"
+        out_detail  = OUTPUT_DIR / f"detail_{mode_label}_{min_n}.csv"
         print(f"\n{'='*60}")
         print(f"[min_movie_count = {min_n}]  [{mode_label}]")
-
-        df_summary, df_detail = evaluate_fn(min_n, reviewer_ids)
-
-        if not df_summary.empty:
-            out = OUTPUT_DIR / f"results_{mode_label}_{min_n}.xlsx"
-            df_summary.to_excel(out, index=False)
-            print(f"  → 保存: {out.name}")
-        if not df_detail.empty:
-            out = OUTPUT_DIR / f"detail_{mode_label}_{min_n}.csv"
-            df_detail.to_csv(out, index=False, encoding="utf-8-sig")
-            print(f"  → 保存: {out.name}")
+        evaluate_fn(min_n, reviewer_ids, out_summary, out_detail)
 
     print("\n[DONE]")
 
