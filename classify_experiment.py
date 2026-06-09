@@ -78,8 +78,16 @@ def compute_metrics(y_true: list[int], y_pred: list[int]) -> dict:
     p, r, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="binary", zero_division=0
     )
-    return {"accuracy": round(acc, 4), "precision": round(p, 4),
-            "recall": round(r, 4), "f1": round(f1, 4)}
+    return {
+        "accuracy":  round(acc, 4),
+        "precision": round(p, 4),
+        "recall":    round(r, 4),
+        "f1":        round(f1, 4),
+        "true_pos":  sum(1 for l in y_true if l == 1),
+        "true_neg":  sum(1 for l in y_true if l == 0),
+        "pred_pos":  sum(1 for l in y_pred if l == 1),
+        "pred_neg":  sum(1 for l in y_pred if l == 0),
+    }
 
 
 # ── 増分保存ヘルパー ──────────────────────────────────────────────────────────
