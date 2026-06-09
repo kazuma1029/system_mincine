@@ -18,6 +18,7 @@ reviews_posinega/ の polarity==1 文を使って BERT をファインチュー�
   python finetune_all_reviewers.py
 """
 
+import math
 import os
 import shutil
 from pathlib import Path
@@ -47,6 +48,8 @@ MODELS_DIR           = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドラ�
 RANKINGS_DIR         = BASE_DIR / "score_rankings"
 
 BERT_MODEL = "cl-tohoku/bert-base-japanese"
+
+_tagger = Tagger()  # モジュール起動時に1回だけ初期化
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
@@ -140,13 +143,12 @@ def score_reviews(
     movie_tfidf: dict,
 ) -> list[tuple[str, float]]:
     """各レビュー文にその映画のTF-IDFスコアの合計を付与する。"""
-    tagger = Tagger()
     result = []
     for review, movie_id in reviews_with_movie:
         tfidf = movie_tfidf.get(movie_id, {})
         s = sum(
             tfidf.get(w.surface, 0.0)
-            for w in tagger(review) if "名詞" in w.feature
+            for w in _tagger(review) if "名詞" in w.feature
         )
         result.append((review, s))
     return result
@@ -204,7 +206,6 @@ def _extract_review_vectors(movie_ids: list, movie_tfidf: dict) -> list[dict]:
     各映画の polarity==1 レビュー文を読み込み、
     映画DBのtf·idf値を使って特徴ベクトル（dict形式）に変換する。
     """
-    tagger = Tagger()
     vectors: list[dict] = []
     for movie_id in movie_ids:
         tfidf = movie_tfidf.get(movie_id)
@@ -222,7 +223,7 @@ def _extract_review_vectors(movie_ids: list, movie_tfidf: dict) -> list[dict]:
                     continue
                 vec = {
                     w.surface: tfidf[w.surface]
-                    for w in tagger(review)
+                    for w in _tagger(review)
                     if "名詞" in w.feature and w.surface in tfidf
                 }
                 vectors.append(vec if vec else {"__empty__": 0.0})
@@ -232,9 +233,9 @@ def _extract_review_vectors(movie_ids: list, movie_tfidf: dict) -> list[dict]:
 
 
 def finetune_svm(
-    reviewer_id: int,
-    liked_ids:    list[str],
-    disliked_ids: list[str],
+    reviewer_id:   int,
+    liked_vecs:    list[dict],
+    disliked_vecs: list[dict],
     min_movie_count: int = 0,
 ):
     """
@@ -245,13 +246,6 @@ def finetune_svm(
     if model_dir.exists():
         print(f"  [SKIP] 既存モデル: {model_dir}")
         return None
-
-    all_ids        = liked_ids + disliked_ids
-    liked_tfidf    = _build_movie_tfidf(liked_ids,    all_movie_ids=all_ids)
-    disliked_tfidf = _build_movie_tfidf(disliked_ids, all_movie_ids=all_ids)
-
-    liked_vecs    = _extract_review_vectors(liked_ids,    liked_tfidf)
-    disliked_vecs = _extract_review_vectors(disliked_ids, disliked_tfidf)
 
     if not liked_vecs or not disliked_vecs:
         print(f"  [SKIP] reviewer {reviewer_id}: 正例または負例が 0 件")
@@ -294,6 +288,7 @@ def finetune(
     liked_reviews:    list[str],
     disliked_reviews: list[str],
     mode: str,
+    tokenizer: BertJapaneseTokenizer,
     min_movie_count: int = 0,
     top_n: int = 0,
     pct: int = 0,
@@ -329,8 +324,6 @@ def finetune(
 
     test_texts  = all_texts[:10]
     test_labels = all_labels[:10]
-
-    tokenizer = BertJapaneseTokenizer.from_pretrained(BERT_MODEL)
 
     train_enc = tokenizer(all_texts,  truncation=True, padding=True, max_length=512)
     test_enc  = tokenizer(test_texts, truncation=True, padding=True, max_length=512)
@@ -379,6 +372,17 @@ def finetune(
 def append_noun_counts(path: Path, reviewer_id: int, liked_count: int, disliked_count: int):
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"reviewer_id={reviewer_id}\tliked={liked_count}\tdisliked={disliked_count}\n")
+
+
+# ── ID パース ─────────────────────────────────────────────────────────────────
+
+def parse_ids(raw) -> list[str]:
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+        return []
+    # 数値型（例: 527.0）で保存されている場合は整数に変換
+    if isinstance(raw, (int, float)):
+        return [str(int(raw))]
+    return [s.strip() for s in str(raw).split(",") if s.strip().isdigit()]
 
 
 # ── メイン ────────────────────────────────────────────────────────────────────
@@ -432,6 +436,12 @@ def main():
     print(f"\n[INFO] モード: {mode_desc}")
     print(f"[INFO] 対象レビュワー条件: 好み映画 >= {min_movie_count} 件 かつ 好みでない映画 >= {min_movie_count} 件\n")
 
+    # ── BERT モード用トークナイザを1回だけロード ──
+    tokenizer = None
+    if mode_label != "svm":
+        print("[INFO] BertJapaneseTokenizer をロード中...")
+        tokenizer = BertJapaneseTokenizer.from_pretrained(BERT_MODEL)
+
     # ── reviewer_summary.xlsx 読み込み ──
     print(f"[INFO] {SUMMARY_PATH.name} を読み込み中...")
     master = pd.read_excel(SUMMARY_PATH, sheet_name="reviewer_master")
@@ -447,6 +457,15 @@ def main():
     metrics_path = BASE_DIR / f"train_metrics_{mode_label}_{min_movie_count}.xlsx"
     noun_mode1_counts_path = BASE_DIR / f"noun_mode1_counts_{min_movie_count}.txt"
     noun_mode2_counts_path = BASE_DIR / f"noun_mode2_counts_{min_movie_count}.txt"
+
+    def append_and_save_stats(entry: dict):
+        all_stats.append(entry)
+        pd.DataFrame(all_stats).to_excel(stats_path, index=False)
+
+    def append_and_save_metrics(entry: dict):
+        all_metrics.append(entry)
+        pd.DataFrame(all_metrics).to_excel(metrics_path, index=False)
+
     MAX_REVIEWER_ID = 250
     total_reviewers = len(pref)
     for idx, row in pref.iterrows():
@@ -459,15 +478,6 @@ def main():
         liked_raw    = row.get("liked_movie_ids",    "")
         disliked_raw = row.get("disliked_movie_ids", "")
 
-        def parse_ids(raw) -> list[str]:
-            import math
-            if raw is None or (isinstance(raw, float) and math.isnan(raw)):
-                return []
-            # 数値型（例: 527.0）で保存されている場合は整数に変換
-            if isinstance(raw, (int, float)):
-                return [str(int(raw))]
-            return [s.strip() for s in str(raw).split(",") if s.strip().isdigit()]
-
         liked_ids    = parse_ids(liked_raw)
         disliked_ids = parse_ids(disliked_raw)
 
@@ -478,29 +488,24 @@ def main():
             print(f"  [SKIP] 映画件数が条件未満 (好み: {len(liked_ids)}, 好みでない: {len(disliked_ids)}, 必要: {min_movie_count})")
             continue
 
-        def append_and_save_stats(entry: dict):
-            all_stats.append(entry)
-            pd.DataFrame(all_stats).to_excel(stats_path, index=False)
-
-        def append_and_save_metrics(entry: dict):
-            all_metrics.append(entry)
-            pd.DataFrame(all_metrics).to_excel(metrics_path, index=False)
-
         if mode_label == "svm":
-            liked_reviews    = load_positive_sentences(liked_ids)
-            disliked_reviews = load_positive_sentences(disliked_ids)
+            all_ids        = liked_ids + disliked_ids
+            liked_tfidf    = _build_movie_tfidf(liked_ids,    all_movie_ids=all_ids)
+            disliked_tfidf = _build_movie_tfidf(disliked_ids, all_movie_ids=all_ids)
+            liked_vecs     = _extract_review_vectors(liked_ids,    liked_tfidf)
+            disliked_vecs  = _extract_review_vectors(disliked_ids, disliked_tfidf)
             append_and_save_stats({
                 "reviewer_id":           reviewer_id,
                 "reviewer_name":         reviewer_name,
                 "liked_movie_count":     len(liked_ids),
                 "disliked_movie_count":  len(disliked_ids),
-                "liked_review_count":    len(liked_reviews),
-                "disliked_review_count": len(disliked_reviews),
+                "liked_review_count":    len(liked_vecs),
+                "disliked_review_count": len(disliked_vecs),
             })
             m = finetune_svm(
                 reviewer_id     = reviewer_id,
-                liked_ids       = liked_ids,
-                disliked_ids    = disliked_ids,
+                liked_vecs      = liked_vecs,
+                disliked_vecs   = disliked_vecs,
                 min_movie_count = min_movie_count,
             )
             if m:
@@ -521,6 +526,7 @@ def main():
                 liked_reviews    = liked_reviews,
                 disliked_reviews = disliked_reviews,
                 mode             = mode_label,
+                tokenizer        = tokenizer,
                 min_movie_count  = min_movie_count,
             )
             if m:
@@ -560,6 +566,7 @@ def main():
                     liked_reviews    = [r for r, _ in liked_scored[:top_n]],
                     disliked_reviews = [r for r, _ in disliked_scored[:top_n]],
                     mode             = "topn",
+                    tokenizer        = tokenizer,
                     min_movie_count  = min_movie_count,
                     top_n            = top_n,
                 )
@@ -601,6 +608,7 @@ def main():
                     liked_reviews    = [r for r, _ in liked_scored[:n]],
                     disliked_reviews = [r for r, _ in disliked_scored[:n]],
                     mode             = "pct",
+                    tokenizer        = tokenizer,
                     min_movie_count  = min_movie_count,
                     pct              = pct,
                 )
