@@ -592,14 +592,14 @@ def main():
 
             save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)
 
+            min_class_count = min(len(liked_scored), len(disliked_scored))
             for pct in PERCENT_LIST:
-                liked_n    = max(1, int(len(liked_scored)    * pct / 100))
-                disliked_n = max(1, int(len(disliked_scored) * pct / 100))
-                print(f"  [{pct}%] 正例: {liked_n:,} 件  負例: {disliked_n:,} 件")
+                n = max(1, int(min_class_count * pct / 100))
+                print(f"  [{pct}%] 基準件数: {min_class_count:,} → 正例: {n:,} 件  負例: {n:,} 件")
                 m = finetune(
                     reviewer_id      = reviewer_id,
-                    liked_reviews    = [r for r, _ in liked_scored[:liked_n]],
-                    disliked_reviews = [r for r, _ in disliked_scored[:disliked_n]],
+                    liked_reviews    = [r for r, _ in liked_scored[:n]],
+                    disliked_reviews = [r for r, _ in disliked_scored[:n]],
                     mode             = "pct",
                     min_movie_count  = min_movie_count,
                     pct              = pct,
