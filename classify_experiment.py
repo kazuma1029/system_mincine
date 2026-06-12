@@ -35,6 +35,8 @@ MOVIE_DATABASE_DIR = BASE_DIR / "movie_database"
 MODELS_DIR         = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
 OUTPUT_DIR         = BASE_DIR / "results"
 
+BERT_MODEL = "cl-tohoku/bert-base-japanese"
+
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 32
 
@@ -112,10 +114,29 @@ def _save_df(df: pd.DataFrame, path: Path):
         df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
+def _append_detail_csv(df: pd.DataFrame, path: Path):
+    """detail用CSVに新規行のみ追記する（全体を読み込んで書き直さない）。"""
+    if df.empty:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, mode="a", index=False, encoding="utf-8-sig",
+              header=not path.exists())
+
+
 # ── BERT 推論 ─────────────────────────────────────────────────────────────────
 
+_tokenizer_cache: BertJapaneseTokenizer | None = None
+
+def _get_tokenizer() -> BertJapaneseTokenizer:
+    """トークナイザは全モデル共通(BERT_MODEL由来)なので一度だけロードする。"""
+    global _tokenizer_cache
+    if _tokenizer_cache is None:
+        _tokenizer_cache = BertJapaneseTokenizer.from_pretrained(BERT_MODEL)
+    return _tokenizer_cache
+
+
 def predict_bert(texts: list[str], model_dir: Path) -> list[int]:
-    tokenizer = BertJapaneseTokenizer.from_pretrained(str(model_dir))
+    tokenizer = _get_tokenizer()
     model     = BertForSequenceClassification.from_pretrained(str(model_dir))
     model.to(DEVICE)
     model.eval()
@@ -159,6 +180,15 @@ def _build_tfidf_from_experiment(reviewer_id: int) -> dict:
     return _load_movie_db()
 
 
+_tagger_cache: Tagger | None = None
+
+def _get_tagger() -> Tagger:
+    global _tagger_cache
+    if _tagger_cache is None:
+        _tagger_cache = Tagger()
+    return _tagger_cache
+
+
 def predict_svm(texts: list[str], movie_ids: list[str],
                 reviewer_id: int, model_dir: Path) -> list[int]:
     """
@@ -166,7 +196,7 @@ def predict_svm(texts: list[str], movie_ids: list[str],
     """
     clf = joblib.load(model_dir / "svm_model.pkl")
     dv  = joblib.load(model_dir / "dict_vectorizer.pkl")
-    tagger = Tagger()
+    tagger = _get_tagger()
 
     movie_tfidf = _build_tfidf_from_experiment(reviewer_id)
 
@@ -203,13 +233,13 @@ def reviewer_ids_in_experiment() -> list[int]:
 # ── 評価ループ ────────────────────────────────────────────────────────────────
 
 def evaluate_allmodels(min_n: int, reviewer_ids: list[int],
+                       experiment_data: dict[int, tuple],
                        out_summary: Path, out_detail: Path) -> None:
     model_base = MODELS_DIR / str(min_n) / "allmodels"
     if not model_base.exists():
         return
 
     df_summary = _load_existing_df(out_summary)
-    df_detail  = _load_existing_df(out_detail)
     done_ids   = set(df_summary["reviewer_id"].tolist()) if not df_summary.empty else set()
 
     for rid in reviewer_ids:
@@ -219,38 +249,35 @@ def evaluate_allmodels(min_n: int, reviewer_ids: list[int],
         model_dir = model_base / str(rid)
         if not model_dir.exists():
             continue
-        exp_dir = EXPERIMENT_DIR / str(rid)
-        if not exp_dir.exists():
+        if rid not in experiment_data:
             continue
         try:
-            texts, ratings, movie_ids = load_experiment(rid)
-            if not texts:
-                continue
+            texts, ratings, movie_ids = experiment_data[rid]
             labels = make_labels(ratings)
             preds  = predict_bert(texts, model_dir)
             m      = compute_metrics(labels, preds)
             df_summary = pd.concat([df_summary, pd.DataFrame([{"reviewer_id": rid, **m}])],
                                    ignore_index=True)
-            df_detail  = pd.concat([df_detail, pd.DataFrame([
+            detail_df = pd.DataFrame([
                 {"reviewer_id": rid, "movie_id": mid, "review": t,
                  "rating": r, "true_label": tl, "pred_label": pl}
                 for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
-            ])], ignore_index=True)
+            ])
             _save_df(df_summary, out_summary)
-            _save_df(df_detail,  out_detail)
+            _append_detail_csv(detail_df, out_detail)
             print(f"  reviewer {rid}: {m}")
         except Exception as e:
             print(f"  [WARN] reviewer {rid}: {e}")
 
 
 def evaluate_nounmodels(min_n: int, reviewer_ids: list[int],
+                        experiment_data: dict[int, tuple],
                         out_summary: Path, out_detail: Path) -> None:
     model_base = MODELS_DIR / str(min_n) / "nounmodels"
     if not model_base.exists():
         return
 
     df_summary = _load_existing_df(out_summary)
-    df_detail  = _load_existing_df(out_detail)
     done_keys  = (set(zip(df_summary["reviewer_id"], df_summary["top_n"]))
                   if not df_summary.empty else set())
 
@@ -258,17 +285,10 @@ def evaluate_nounmodels(min_n: int, reviewer_ids: list[int],
         reviewer_model_dir = model_base / str(rid)
         if not reviewer_model_dir.exists():
             continue
-        exp_dir = EXPERIMENT_DIR / str(rid)
-        if not exp_dir.exists():
+        if rid not in experiment_data:
             continue
-        try:
-            texts, ratings, movie_ids = load_experiment(rid)
-            if not texts:
-                continue
-            labels = make_labels(ratings)
-        except Exception as e:
-            print(f"  [WARN] reviewer {rid} データ読み込み失敗: {e}")
-            continue
+        texts, ratings, movie_ids = experiment_data[rid]
+        labels = make_labels(ratings)
 
         for n_dir in sorted(reviewer_model_dir.iterdir(),
                             key=lambda p: int(p.name) if p.name.isdigit() else 0):
@@ -284,26 +304,26 @@ def evaluate_nounmodels(min_n: int, reviewer_ids: list[int],
                 df_summary = pd.concat([df_summary, pd.DataFrame([
                     {"reviewer_id": rid, "top_n": top_n, **m}
                 ])], ignore_index=True)
-                df_detail  = pd.concat([df_detail, pd.DataFrame([
+                detail_df = pd.DataFrame([
                     {"reviewer_id": rid, "top_n": top_n, "movie_id": mid,
                      "review": t, "rating": r, "true_label": tl, "pred_label": pl}
                     for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
-                ])], ignore_index=True)
+                ])
                 _save_df(df_summary, out_summary)
-                _save_df(df_detail,  out_detail)
+                _append_detail_csv(detail_df, out_detail)
                 print(f"  reviewer {rid} N={top_n}: {m}")
             except Exception as e:
                 print(f"  [WARN] reviewer {rid} N={top_n}: {e}")
 
 
 def evaluate_svmmodels(min_n: int, reviewer_ids: list[int],
+                       experiment_data: dict[int, tuple],
                        out_summary: Path, out_detail: Path) -> None:
     model_base = MODELS_DIR / str(min_n) / "svmmodels"
     if not model_base.exists():
         return
 
     df_summary = _load_existing_df(out_summary)
-    df_detail  = _load_existing_df(out_detail)
     done_ids   = set(df_summary["reviewer_id"].tolist()) if not df_summary.empty else set()
 
     for rid in reviewer_ids:
@@ -313,38 +333,35 @@ def evaluate_svmmodels(min_n: int, reviewer_ids: list[int],
         model_dir = model_base / str(rid)
         if not model_dir.exists():
             continue
-        exp_dir = EXPERIMENT_DIR / str(rid)
-        if not exp_dir.exists():
+        if rid not in experiment_data:
             continue
         try:
-            texts, ratings, movie_ids = load_experiment(rid)
-            if not texts:
-                continue
+            texts, ratings, movie_ids = experiment_data[rid]
             labels = make_labels(ratings)
             preds  = predict_svm(texts, movie_ids, rid, model_dir)
             m      = compute_metrics(labels, preds)
             df_summary = pd.concat([df_summary, pd.DataFrame([{"reviewer_id": rid, **m}])],
                                    ignore_index=True)
-            df_detail  = pd.concat([df_detail, pd.DataFrame([
+            detail_df = pd.DataFrame([
                 {"reviewer_id": rid, "movie_id": mid, "review": t,
                  "rating": r, "true_label": tl, "pred_label": pl}
                 for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
-            ])], ignore_index=True)
+            ])
             _save_df(df_summary, out_summary)
-            _save_df(df_detail,  out_detail)
+            _append_detail_csv(detail_df, out_detail)
             print(f"  reviewer {rid}: {m}")
         except Exception as e:
             print(f"  [WARN] reviewer {rid}: {e}")
 
 
 def evaluate_pctmodels(min_n: int, reviewer_ids: list[int],
+                       experiment_data: dict[int, tuple],
                        out_summary: Path, out_detail: Path) -> None:
     model_base = MODELS_DIR / str(min_n) / "pctmodels"
     if not model_base.exists():
         return
 
     df_summary = _load_existing_df(out_summary)
-    df_detail  = _load_existing_df(out_detail)
     done_keys  = (set(zip(df_summary["reviewer_id"], df_summary["pct"]))
                   if not df_summary.empty else set())
 
@@ -352,17 +369,10 @@ def evaluate_pctmodels(min_n: int, reviewer_ids: list[int],
         reviewer_model_dir = model_base / str(rid)
         if not reviewer_model_dir.exists():
             continue
-        exp_dir = EXPERIMENT_DIR / str(rid)
-        if not exp_dir.exists():
+        if rid not in experiment_data:
             continue
-        try:
-            texts, ratings, movie_ids = load_experiment(rid)
-            if not texts:
-                continue
-            labels = make_labels(ratings)
-        except Exception as e:
-            print(f"  [WARN] reviewer {rid} データ読み込み失敗: {e}")
-            continue
+        texts, ratings, movie_ids = experiment_data[rid]
+        labels = make_labels(ratings)
 
         pct_dirs = sorted(
             [p for p in reviewer_model_dir.iterdir()
@@ -380,13 +390,13 @@ def evaluate_pctmodels(min_n: int, reviewer_ids: list[int],
                 df_summary = pd.concat([df_summary, pd.DataFrame([
                     {"reviewer_id": rid, "pct": pct, **m}
                 ])], ignore_index=True)
-                df_detail  = pd.concat([df_detail, pd.DataFrame([
+                detail_df = pd.DataFrame([
                     {"reviewer_id": rid, "pct": pct, "movie_id": mid,
                      "review": t, "rating": r, "true_label": tl, "pred_label": pl}
                     for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
-                ])], ignore_index=True)
+                ])
                 _save_df(df_summary, out_summary)
-                _save_df(df_detail,  out_detail)
+                _append_detail_csv(detail_df, out_detail)
                 print(f"  reviewer {rid} pct={pct}%: {m}")
             except Exception as e:
                 print(f"  [WARN] reviewer {rid} pct={pct}%: {e}")
@@ -428,12 +438,20 @@ def main():
     print(f"[INFO] min_movie_count: {min_counts}")
     print(f"[INFO] 対象レビュワー数: {len(reviewer_ids)}")
 
+    # 実験データは min_movie_count に依存しないため、ここで一度だけ読み込む
+    print("[INFO] レビュワーごとの実験データを読み込み中...")
+    experiment_data: dict[int, tuple] = {}
+    for rid in reviewer_ids:
+        texts, ratings, movie_ids = load_experiment(rid)
+        if texts:
+            experiment_data[rid] = (texts, ratings, movie_ids)
+
     for min_n in min_counts:
         out_summary = OUTPUT_DIR / f"results_{mode_label}_{min_n}.xlsx"
         out_detail  = OUTPUT_DIR / f"detail_{mode_label}_{min_n}.csv"
         print(f"\n{'='*60}")
         print(f"[min_movie_count = {min_n}]  [{mode_label}]")
-        evaluate_fn(min_n, reviewer_ids, out_summary, out_detail)
+        evaluate_fn(min_n, reviewer_ids, experiment_data, out_summary, out_detail)
 
     print("\n[DONE]")
 
