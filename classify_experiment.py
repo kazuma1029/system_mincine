@@ -18,6 +18,7 @@ accuracy / precision / recall / F-measure をレビュワーごとに xlsx 出�
   {MODELS_DIR}/{min_n}/pctmodels/{reviewer_id}/pct{pct}/
 """
 
+import random
 from pathlib import Path
 
 import joblib
@@ -32,7 +33,7 @@ from transformers import BertForSequenceClassification, BertJapaneseTokenizer
 BASE_DIR           = Path(__file__).parent
 EXPERIMENT_DIR     = BASE_DIR / "experiment_all"
 MOVIE_DATABASE_DIR = BASE_DIR / "movie_database"
-MODELS_DIR         = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
+MODELS_DIR         = Path(r"/home/oyabu/GoogleDriveRclone/models")
 OUTPUT_DIR         = BASE_DIR / "results"
 
 BERT_MODEL = "cl-tohoku/bert-base-japanese"
@@ -402,6 +403,53 @@ def evaluate_pctmodels(min_n: int, reviewer_ids: list[int],
                 print(f"  [WARN] reviewer {rid} pct={pct}%: {e}")
 
 
+# ── ランダム分類 ──────────────────────────────────────────────────────────────
+
+_N_RANDOM_VOTES = 11   # 多数決の試行回数（奇数推奨）
+
+def evaluate_randommodel(min_n: int, reviewer_ids: list[int],
+                         experiment_data: dict[int, tuple],
+                         out_summary: Path, out_detail: Path) -> None:
+    """
+    各レビューを _N_RANDOM_VOTES 回ランダムに 0/1 分類し、
+    過半数（>= ceil(N/2)）の結果を最終ラベルとして精度を計算する。
+    モデルのロード不要・min_n はファイル名に使うだけ。
+    """
+    threshold = _N_RANDOM_VOTES // 2 + 1   # 11回なら 6
+
+    df_summary = _load_existing_df(out_summary)
+    done_ids   = set(df_summary["reviewer_id"].tolist()) if not df_summary.empty else set()
+
+    for rid in reviewer_ids:
+        if rid in done_ids:
+            print(f"  [SKIP] reviewer {rid}: 既存結果あり")
+            continue
+        if rid not in experiment_data:
+            continue
+        try:
+            texts, ratings, movie_ids = experiment_data[rid]
+            labels = make_labels(ratings)
+            preds = [
+                1 if sum(random.randint(0, 1) for _ in range(_N_RANDOM_VOTES)) >= threshold else 0
+                for _ in texts
+            ]
+            m = compute_metrics(labels, preds)
+            df_summary = pd.concat(
+                [df_summary, pd.DataFrame([{"reviewer_id": rid, **m}])],
+                ignore_index=True,
+            )
+            detail_df = pd.DataFrame([
+                {"reviewer_id": rid, "movie_id": mid, "review": t,
+                 "rating": r, "true_label": tl, "pred_label": pl}
+                for t, mid, r, tl, pl in zip(texts, movie_ids, ratings, labels, preds)
+            ])
+            _save_df(df_summary, out_summary)
+            _append_detail_csv(detail_df, out_detail)
+            print(f"  reviewer {rid}: {m}")
+        except Exception as e:
+            print(f"  [WARN] reviewer {rid}: {e}")
+
+
 # ── メイン ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -414,26 +462,32 @@ def main():
     print("  2: 全レビュー BERT で分類      (allmodels)")
     print("  3: TF-IDF 上位N件 BERT で分類  (nounmodels)")
     print("  4: TF-IDF 上位N%  BERT で分類  (pctmodels)")
+    print(f"  5: ランダム分類（{_N_RANDOM_VOTES}回多数決）  (randommodel)")
     print("=" * 60)
-    mode_input = input("モード (1/2/3/4): ").strip()
-    while mode_input not in ("1", "2", "3", "4"):
-        mode_input = input("1, 2, 3, または 4 を入力してください: ").strip()
+    mode_input = input("モード (1/2/3/4/5): ").strip()
+    while mode_input not in ("1", "2", "3", "4", "5"):
+        mode_input = input("1, 2, 3, 4, または 5 を入力してください: ").strip()
     mode = int(mode_input)
 
-    mode_label = {1: "svmmodels", 2: "allmodels", 3: "nounmodels", 4: "pctmodels"}[mode]
+    mode_label = {1: "svmmodels", 2: "allmodels", 3: "nounmodels",
+                  4: "pctmodels",  5: "randommodel"}[mode]
     evaluate_fn = {
         1: evaluate_svmmodels,
         2: evaluate_allmodels,
         3: evaluate_nounmodels,
         4: evaluate_pctmodels,
+        5: evaluate_randommodel,
     }[mode]
 
     min_counts   = find_min_movie_counts()
     reviewer_ids = reviewer_ids_in_experiment()
 
+    # モード5はモデルディレクトリが不要なので min_counts が空でも動作させる
     if not min_counts:
-        print("[ERROR] modelsディレクトリ内にmin_movie_countディレクトリが見つかりません。")
-        return
+        if mode != 5:
+            print("[ERROR] modelsディレクトリ内にmin_movie_countディレクトリが見つかりません。")
+            return
+        min_counts = [0]   # ダミー（ファイル名に使用）
     print(f"\n[INFO] モード: {mode_label}")
     print(f"[INFO] min_movie_count: {min_counts}")
     print(f"[INFO] 対象レビュワー数: {len(reviewer_ids)}")

@@ -16,3 +16,5 @@ createDataset.py
 score_rankings/
 results/
 .gitignore
+count_fintune_reviews.py
+

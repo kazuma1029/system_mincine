@@ -44,7 +44,7 @@ BASE_DIR             = Path(__file__).parent
 SUMMARY_PATH         = BASE_DIR / "reviewer_summary.xlsx"
 POSINEGA_DIR         = BASE_DIR / "reviews_posinega"
 MOVIE_DATABASE_DIR   = BASE_DIR / "movie_database"
-MODELS_DIR           = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
+MODELS_DIR           = Path(r"/home/oyabu/GoogleDriveRclone/models")
 RANKINGS_DIR         = BASE_DIR / "score_rankings"
 
 BERT_MODEL = "cl-tohoku/bert-base-japanese"
