@@ -377,7 +377,8 @@ def evaluate_pctmodels(min_n: int, reviewer_ids: list[int],
 
         pct_dirs = sorted(
             [p for p in reviewer_model_dir.iterdir()
-             if p.is_dir() and p.name.startswith("pct") and p.name[3:].isdigit()],
+             if p.is_dir() and p.name.startswith("pct") and p.name[3:].isdigit()
+             and int(p.name[3:]) == 100],  # 一時的にpct=100%のみ対象
             key=lambda p: int(p.name[3:]),
         )
         for pct_dir in pct_dirs:
@@ -413,7 +414,7 @@ def evaluate_randommodel(min_n: int, reviewer_ids: list[int],
     """
     各レビューを _N_RANDOM_VOTES 回ランダムに 0/1 分類し、
     過半数（>= ceil(N/2)）の結果を最終ラベルとして精度を計算する。
-    モデルのロード不要・min_n はファイル名に使うだけ。
+    嗜好映画数が min_n 件未満のレビュワーはスキップする。
     """
     threshold = _N_RANDOM_VOTES // 2 + 1   # 11回なら 6
 
@@ -482,15 +483,26 @@ def main():
     min_counts   = find_min_movie_counts()
     reviewer_ids = reviewer_ids_in_experiment()
 
-    # モード5はモデルディレクトリが不要なので min_counts が空でも動作させる
     if not min_counts:
-        if mode != 5:
-            print("[ERROR] modelsディレクトリ内にmin_movie_countディレクトリが見つかりません。")
-            return
-        min_counts = [0]   # ダミー（ファイル名に使用）
+        print("[ERROR] modelsディレクトリ内にmin_movie_countディレクトリが見つかりません。")
+        return
     print(f"\n[INFO] モード: {mode_label}")
     print(f"[INFO] min_movie_count: {min_counts}")
     print(f"[INFO] 対象レビュワー数: {len(reviewer_ids)}")
+
+    # モデル（モード5はallmodels）が存在するレビュワーのみ対象とする
+    ref_label = "allmodels" if mode == 5 else mode_label
+    needed_ids: set[int] = set()
+    for min_n in min_counts:
+        model_base = MODELS_DIR / str(min_n) / ref_label
+        if not model_base.exists():
+            continue
+        for p in model_base.iterdir():
+            if p.name.isdigit():
+                needed_ids.add(int(p.name))
+    reviewer_ids = [rid for rid in reviewer_ids if rid in needed_ids]
+    print(f"[INFO] 対象レビュワー数（allmodels基準）: {len(reviewer_ids)}" if mode == 5
+          else f"[INFO] モデルが存在するレビュワー数: {len(reviewer_ids)}")
 
     # 実験データは min_movie_count に依存しないため、ここで一度だけ読み込む
     print("[INFO] レビュワーごとの実験データを読み込み中...")

@@ -1,7 +1,7 @@
-# finetune_all_reviewers.py
+# finetune_all_reviewers_126.py
 # -*- coding: utf-8 -*-
 """
-全レビュワーに対して reviewer_summary.xlsx から好み映画・好みでない映画を参照し、
+レビュワー 126~250 に対して reviewer_summary.xlsx から好み映画・好みでない映画を参照し、
 reviews_posinega/ の polarity==1 文を使って BERT をファインチューニングする。
 
 データ構成:
@@ -15,7 +15,7 @@ reviews_posinega/ の polarity==1 文を使って BERT をファインチュー�
      → models/nounmodels/{reviewerID}/{N}/
 
 実行:
-  python finetune_all_reviewers.py
+  python finetune_all_reviewers_126.py
 """
 
 import math
@@ -44,6 +44,7 @@ BASE_DIR             = Path(__file__).parent
 SUMMARY_PATH         = BASE_DIR / "reviewer_summary.xlsx"
 POSINEGA_DIR         = BASE_DIR / "reviews_posinega"
 MOVIE_DATABASE_DIR   = BASE_DIR / "movie_database"
+# MODELS_DIR           = Path(r"C:\Users\Oyabu\GoogleDriveStreaming\マイドライブ\models")
 MODELS_DIR           = Path(r"/home/oyabu/GoogleDriveRclone/models")
 RANKINGS_DIR         = BASE_DIR / "score_rankings"
 
@@ -405,14 +406,14 @@ def main():
         print("-" * 60)
         print("  nounmodels サブモードを選択してください")
         print("  1: N=100~5000（固定件数）")
-        print("  2: N=10%~100%（レビュー数に対する割合）→ pctmodels に保存")
+        print("  2: N=10%~90%（レビュー数に対する割合）→ pctmodels に保存")
         print("-" * 60)
         noun_submode = input("サブモード (1 or 2): ").strip()
         while noun_submode not in ("1", "2"):
             noun_submode = input("1 または 2 を入力してください: ").strip()
 
     TOP_N_LIST   = list(range(100, 5001, 100))   # 100, 200, ..., 5000
-    PERCENT_LIST = list(range(10, 101, 10))        # 10, 20, ..., 100
+    PERCENT_LIST = list(range(10, 91, 10))        # 10, 20, ..., 90
 
     # ── 最小映画件数フィルタ ──
     min_n_input = input("好み・好みでない映画がそれぞれ何件以上のレビュワーを対象にしますか？（例: 10）: ").strip()
@@ -431,7 +432,7 @@ def main():
         mode_desc  = "nounmodels モード1: 上位 N 件 BERT (N=100~5000)"
     else:
         mode_label = "pct"
-        mode_desc  = "nounmodels モード2: 上位 N% BERT (10%~100%) → pctmodels"
+        mode_desc  = "nounmodels モード2: 上位 N% BERT (10%~90%) → pctmodels"
 
     print(f"\n[INFO] モード: {mode_desc}")
     print(f"[INFO] 対象レビュワー条件: 好み映画 >= {min_movie_count} 件 かつ 好みでない映画 >= {min_movie_count} 件\n")
@@ -452,24 +453,27 @@ def main():
     RANKINGS_DIR.mkdir(exist_ok=True)
 
     all_stats    = []
-    stats_path   = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"
+    # stats_path   = BASE_DIR / f"reviewer_stats_{min_movie_count}.xlsx"  # 一時コメントアウト
     all_metrics  = []
-    metrics_path = BASE_DIR / f"train_metrics_{mode_label}_{min_movie_count}.xlsx"
-    noun_mode1_counts_path = BASE_DIR / f"noun_mode1_counts_{min_movie_count}.txt"
-    noun_mode2_counts_path = BASE_DIR / f"noun_mode2_counts_{min_movie_count}.txt"
+    # metrics_path = BASE_DIR / f"train_metrics_{mode_label}_{min_movie_count}.xlsx"  # 一時コメントアウト
+    # noun_mode1_counts_path = BASE_DIR / f"noun_mode1_counts_{min_movie_count}.txt"  # 一時コメントアウト
+    # noun_mode2_counts_path = BASE_DIR / f"noun_mode2_counts_{min_movie_count}.txt"  # 一時コメントアウト
 
     def append_and_save_stats(entry: dict):
         all_stats.append(entry)
-        pd.DataFrame(all_stats).to_excel(stats_path, index=False)
+        # pd.DataFrame(all_stats).to_excel(stats_path, index=False)  # 一時コメントアウト
 
     def append_and_save_metrics(entry: dict):
         all_metrics.append(entry)
-        pd.DataFrame(all_metrics).to_excel(metrics_path, index=False)
+        # pd.DataFrame(all_metrics).to_excel(metrics_path, index=False)  # 一時コメントアウト
 
+    MIN_REVIEWER_ID = 126
     MAX_REVIEWER_ID = 250
     total_reviewers = len(pref)
     for idx, row in pref.iterrows():
         reviewer_id = int(row["reviewer"])
+        if reviewer_id < MIN_REVIEWER_ID:
+            continue
         if reviewer_id > MAX_REVIEWER_ID:
             print(f"  [STOP] reviewer_id {reviewer_id} が上限 {MAX_REVIEWER_ID} を超えたため終了")
             break
@@ -552,7 +556,7 @@ def main():
             liked_scored.sort(key=lambda x: x[1],    reverse=True)
             disliked_scored.sort(key=lambda x: x[1], reverse=True)
 
-            save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)
+            # save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)  # 一時コメントアウト
 
             top_n_step = TOP_N_LIST[1] - TOP_N_LIST[0] if len(TOP_N_LIST) > 1 else TOP_N_LIST[0]
             for top_n in TOP_N_LIST:
@@ -573,8 +577,8 @@ def main():
                 if m:
                     append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "topn", "top_n": top_n, **m})
 
-            append_noun_counts(noun_mode1_counts_path, reviewer_id,
-                               len(liked_scored), len(disliked_scored))
+            # append_noun_counts(noun_mode1_counts_path, reviewer_id,  # 一時コメントアウト
+            #                    len(liked_scored), len(disliked_scored))
 
         elif mode_label == "pct":
             # TF-IDF スコアを一度だけ計算してパーセンテージごとに再利用
@@ -597,7 +601,7 @@ def main():
             liked_scored.sort(key=lambda x: x[1],    reverse=True)
             disliked_scored.sort(key=lambda x: x[1], reverse=True)
 
-            save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)
+            # save_ranking_xlsx(reviewer_id, liked_scored, disliked_scored)  # 一時コメントアウト
 
             min_class_count = min(len(liked_scored), len(disliked_scored))
             for pct in PERCENT_LIST:
@@ -615,8 +619,8 @@ def main():
                 if m:
                     append_and_save_metrics({"reviewer_id": reviewer_id, "mode": "pct", "pct": pct, **m})
 
-            append_noun_counts(noun_mode2_counts_path, reviewer_id,
-                               len(liked_scored), len(disliked_scored))
+            # append_noun_counts(noun_mode2_counts_path, reviewer_id,  # 一時コメントアウト
+            #                    len(liked_scored), len(disliked_scored))
 
     print("\n[DONE] 全レビュワーのファインチューニングが完了しました。")
 
